@@ -60,13 +60,18 @@ class InferenceProfiler:
         os.makedirs(log_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
 
+        # 先创建 trace_dir，日志文件都放在 trace 文件夹下
+        self.trace_dir = f"{log_dir}/{timestamp}_trace"
+        os.makedirs(self.trace_dir, exist_ok=True)
+
         formatter = logging.Formatter(
             fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
 
+        # 日志文件放在 trace 文件夹下
         file_handler = logging.FileHandler(
-            f"{log_dir}/{timestamp}_inference.log", mode="a", encoding="utf-8"
+            f"{self.trace_dir}/inference.log", mode="a", encoding="utf-8"
         )
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(formatter)
@@ -75,13 +80,10 @@ class InferenceProfiler:
         stdout_handler.setLevel(logging.INFO)
         stdout_handler.setFormatter(formatter)
 
-        self.logger = logging.getLogger("wukong_inference")
+        self.logger = logging.getLogger("wukong_inference.profiler")
         self.logger.setLevel(logging.INFO)
         self.logger.addHandler(file_handler)
         self.logger.addHandler(stdout_handler)
-
-        self.trace_dir = f"{log_dir}/{timestamp}_trace"
-        os.makedirs(self.trace_dir, exist_ok=True)
 
     def setup_model_and_data(self):
         """设置模型和测试数据"""
@@ -770,6 +772,36 @@ def main():
         print("TensorFlow is not available. Exiting.")
         return
 
+    # 设置根日志（在创建 InferenceProfiler 之前）
+    log_dir = "logs/tensorflow_inference"
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
+
+    # 先创建 trace_dir，日志文件都放在 trace 文件夹下
+    trace_dir = f"{log_dir}/{timestamp}_trace"
+    os.makedirs(trace_dir, exist_ok=True)
+
+    formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # 日志文件放在 trace 文件夹下
+    file_handler = logging.FileHandler(
+        f"{trace_dir}/main.log", mode="a", encoding="utf-8"
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(formatter)
+
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setLevel(logging.INFO)
+    stdout_handler.setFormatter(formatter)
+
+    logger = logging.getLogger("wukong_inference.main")
+    logger.setLevel(logging.INFO)
+    logger.addHandler(file_handler)
+    logger.addHandler(stdout_handler)
+
     # 解析命令行参数
     parser = argparse.ArgumentParser(
         description='Wukong Model TensorFlow Inference Script - Support CPU/MUSA device comparison',
@@ -809,11 +841,11 @@ def main():
     if args.device == 'musa':
         try:
             tf.load_library(args.musa_plugin)
-            print(f">>>> [MUSA] Plugin loaded successfully from: {args.musa_plugin}")
+            logger.info(f">>>> [MUSA] Plugin loaded successfully from: {args.musa_plugin}")
         except Exception as e:
-            print(f"!!!! [MUSA] Failed to load plugin: {e}")
+            logger.error(f"!!!! [MUSA] Failed to load plugin: {e}")
     else:
-        print("Running on CPU, MUSA plugin not loaded")
+        logger.info("Running on CPU, MUSA plugin not loaded")
 
     # 设置设备日志（默认关闭，避免大量打印）
     tf.debugging.set_log_device_placement(args.log_device_placement)
@@ -830,10 +862,10 @@ def main():
             # Run operator profiling
             result, inference_time = profiler.profile_operator_times((profiler.test_sparse, profiler.test_dense))
 
-            print(f"\nOperator profiling completed successfully!")
-            print(f"Total inference time: {inference_time:.6f} seconds")
-            print(f"Throughput: {profiler.batch_size / inference_time:.2f} samples/second")
-            print(f"Results saved in: {profiler.trace_dir}")
+            logger.info(f"\nOperator profiling completed successfully!")
+            logger.info(f"Total inference time: {inference_time:.6f} seconds")
+            logger.info(f"Throughput: {profiler.batch_size / inference_time:.2f} samples/second")
+            logger.info(f"Results saved in: {profiler.trace_dir}")
 
             # Print operator timing results
             profiler.print_operator_timings()
@@ -843,15 +875,15 @@ def main():
                 inference_rounds=args.inference_rounds
             )
 
-            print(f"\nInference-only mode completed successfully!")
-            print(f"Average inference time: {result['average_time']:.6f} seconds")
-            print(f"Average throughput: {result['average_throughput']:.2f} samples/second")
-            print(f"Min/Max throughput: {result['min_throughput']:.2f}/{result['max_throughput']:.2f} samples/second")
-            print(f"Results saved in: {profiler.trace_dir}")
+            logger.info(f"\nInference-only mode completed successfully!")
+            logger.info(f"Average inference time: {result['average_time']:.6f} seconds")
+            logger.info(f"Average throughput: {result['average_throughput']:.2f} samples/second")
+            logger.info(f"Min/Max throughput: {result['min_throughput']:.2f}/{result['max_throughput']:.2f} samples/second")
+            logger.info(f"Results saved in: {profiler.trace_dir}")
     else:
         if args.profile_ops:
             # Run comprehensive analysis with operator profiling
-            print("Running comprehensive analysis with operator profiling...")
+            logger.info("Running comprehensive analysis with operator profiling...")
 
             # Run operator profiling
             result, inference_time = profiler.profile_operator_times((profiler.test_sparse, profiler.test_dense))
@@ -859,35 +891,35 @@ def main():
             # Print operator timing results
             profiler.print_operator_timings()
 
-            print(f"\nOperator profiling completed successfully!")
-            print(f"Total inference time: {inference_time:.6f} seconds")
-            print(f"Throughput: {profiler.batch_size / inference_time:.2f} samples/second")
-            print(f"Results saved in: {profiler.trace_dir}")
+            logger.info(f"\nOperator profiling completed successfully!")
+            logger.info(f"Total inference time: {inference_time:.6f} seconds")
+            logger.info(f"Throughput: {profiler.batch_size / inference_time:.2f} samples/second")
+            logger.info(f"Results saved in: {profiler.trace_dir}")
         else:
             # 运行完整分析
             result = profiler.run_comprehensive_analysis()
 
-            print(f"\nInference completed successfully!")
-            print(f"Total time: {result['inference_time']:.4f} seconds")
-            print(f"Throughput: {result['throughput']:.2f} samples/second")
-            print(f"Device used: {result['device_type']}")
+            logger.info(f"\nInference completed successfully!")
+            logger.info(f"Total time: {result['inference_time']:.4f} seconds")
+            logger.info(f"Throughput: {result['throughput']:.2f} samples/second")
+            logger.info(f"Device used: {result['device_type']}")
 
             # 打印算子设备分布摘要
             op_summary = result['operator_device_summary']
-            print(f"Operator distribution:")
-            print(f"  CPU ops: {op_summary['cpu_ops_count']}")
-            print(f"  MUSA ops: {op_summary['musa_ops_count']}")
-            print(f"  GPU ops: {op_summary['gpu_ops_count']}")
-            print(f"  Other ops: {op_summary['other_ops_count']}")
+            logger.info(f"Operator distribution:")
+            logger.info(f"  CPU ops: {op_summary['cpu_ops_count']}")
+            logger.info(f"  MUSA ops: {op_summary['musa_ops_count']}")
+            logger.info(f"  GPU ops: {op_summary['gpu_ops_count']}")
+            logger.info(f"  Other ops: {op_summary['other_ops_count']}")
 
             # 打印性能分析摘要
             perf_summary = result['performance_profile']
-            print(f"Performance profiling results:")
-            print(f"  Average inference time: {perf_summary['average_time']:.6f} seconds")
-            print(f"  Average throughput: {perf_summary['average_throughput']:.2f} samples/second")
-            print(f"  Min/Max throughput: {perf_summary['min_throughput']:.2f}/{perf_summary['max_throughput']:.2f} samples/second")
+            logger.info(f"Performance profiling results:")
+            logger.info(f"  Average inference time: {perf_summary['average_time']:.6f} seconds")
+            logger.info(f"  Average throughput: {perf_summary['average_throughput']:.2f} samples/second")
+            logger.info(f"  Min/Max throughput: {perf_summary['min_throughput']:.2f}/{perf_summary['max_throughput']:.2f} samples/second")
 
-            print(f"Trace files are saved in: {profiler.trace_dir}")
+            logger.info(f"Trace files are saved in: {profiler.trace_dir}")
 
 
 if __name__ == "__main__":

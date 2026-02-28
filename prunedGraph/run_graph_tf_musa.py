@@ -73,13 +73,18 @@ class GraphProfiler:
         os.makedirs(log_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
 
+        # 先创建 trace_dir，日志文件都放在 trace 文件夹下
+        self.trace_dir = f"{log_dir}/{timestamp}_trace"
+        os.makedirs(self.trace_dir, exist_ok=True)
+
         formatter = logging.Formatter(
             fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
 
+        # 日志文件放在 trace 文件夹下
         file_handler = logging.FileHandler(
-            f"{log_dir}/{timestamp}_inference.log", mode="a", encoding="utf-8"
+            f"{self.trace_dir}/inference.log", mode="a", encoding="utf-8"
         )
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(formatter)
@@ -88,13 +93,10 @@ class GraphProfiler:
         stdout_handler.setLevel(logging.INFO)
         stdout_handler.setFormatter(formatter)
 
-        self.logger = logging.getLogger("graph_inference")
+        self.logger = logging.getLogger("graph_inference.profiler")
         self.logger.setLevel(logging.INFO)
         self.logger.addHandler(file_handler)
         self.logger.addHandler(stdout_handler)
-
-        self.trace_dir = f"{log_dir}/{timestamp}_trace"
-        os.makedirs(self.trace_dir, exist_ok=True)
 
     def run_inference_only(self, warmup_rounds: int = 5, inference_rounds: int = 20) -> Dict[str, Any]:
         """仅运行 warmup 和 inference，不进行其他分析
@@ -363,9 +365,10 @@ class GraphProfiler:
 
         # 使用 prettytable 打印表格
         if PRETTYTABLE_AVAILABLE and op_stats:
-            print("\n" + "=" * 100)
-            print(f"算子执行时间统计 (Device: {self.device_type}, Top 30 by Duration)")
-            print("=" * 100)
+            # 使用 logger 输出表格，避免与其他日志输出穿插
+            self.logger.info("\n" + "=" * 100)
+            self.logger.info(f"算子执行时间统计 (Device: {self.device_type}, Top 30 by Duration)")
+            self.logger.info("=" * 100)
 
             table = PrettyTable()
             table.field_names = ["Rank", "Operator Name", "Device", "Duration (ms)"]
@@ -381,10 +384,12 @@ class GraphProfiler:
                     f"{stat['duration_ms']:.3f}"
                 ])
 
-            print(table)
+            # 将表格作为整体通过 logger 输出，避免穿插
+            for line in table.get_string().split('\n'):
+                self.logger.info(line)
 
             if len(op_stats) > 30:
-                print(f"... 还有 {len(op_stats) - 30} 个算子")
+                self.logger.info(f"... 还有 {len(op_stats) - 30} 个算子")
         else:
             # 降级到普通打印
             self.logger.info(f"{'Operator Name':<50} {'Device':<20} {'Duration(ms)':<12}")
@@ -395,8 +400,8 @@ class GraphProfiler:
 
         self.logger.info("=" * 80)
 
-        # 保存结果
-        if op_stats:
+        # 保存结果（标记为 RunMetadata 来源，避免与 print_operator_timings 的保存消息重复）
+        if op_stats and not self.operator_timings:
             timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
             op_stats_file = os.path.join(self.trace_dir, f"op_stats_{self.device_type}_{timestamp}.json")
             with open(op_stats_file, 'w') as f:
@@ -481,9 +486,10 @@ class GraphProfiler:
 
         # 使用 prettytable 打印表格
         if PRETTYTABLE_AVAILABLE:
-            print("\n" + "=" * 100)
-            print(f"算子执行时间统计 (Device: {self.device_type}, Top 30 by Total Time)")
-            print("=" * 100)
+            # 使用 logger 输出表格，避免与其他日志输出穿插
+            self.logger.info("\n" + "=" * 100)
+            self.logger.info(f"算子执行时间统计 (Device: {self.device_type}, Top 30 by Total Time)")
+            self.logger.info("=" * 100)
 
             table = PrettyTable()
             table.field_names = ["Rank", "Operator Name", "Total Time (ms)", "Count", "Avg Time (ms)"]
@@ -501,10 +507,12 @@ class GraphProfiler:
                     f"{stat['avg_time_ms']:.3f}"
                 ])
 
-            print(table)
+            # 将表格作为整体通过 logger 输出，避免穿插
+            for line in table.get_string().split('\n'):
+                self.logger.info(line)
 
             if len(all_op_stats) > 30:
-                print(f"... 还有 {len(all_op_stats) - 30} 个算子")
+                self.logger.info(f"... 还有 {len(all_op_stats) - 30} 个算子")
         else:
             # 降级到普通打印
             self.logger.info("\n" + "=" * 80)
@@ -691,7 +699,7 @@ def create_mock_data(placeholders: Dict[str, Dict], batch_size: int) -> Dict[str
     Returns:
         输入数据字典
     """
-    logger = logging.getLogger("graph_inference")
+    logger = logging.getLogger("graph_inference.main")
     logger.info("\n=== 创建 Mock 数据 ===")
 
     feed_dict = {}
@@ -756,7 +764,7 @@ def run_inference(graph_def: graph_pb2.GraphDef, feed_dict: Dict, output_node_na
     Returns:
         推理结果，如果失败则返回 None
     """
-    logger = logging.getLogger("graph_inference")
+    logger = logging.getLogger("graph_inference.main")
     logger.info(f"\n=== 执行图推理 (Device: {device_type}) ===")
     logger.info(f"输出节点：{output_node_name}")
 
@@ -827,13 +835,18 @@ def main():
     os.makedirs(log_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
 
+    # 先创建 trace_dir，日志文件都放在 trace 文件夹下
+    trace_dir = f"{log_dir}/{timestamp}_trace"
+    os.makedirs(trace_dir, exist_ok=True)
+
     formatter = logging.Formatter(
         fmt="%(asctime)s | %(levelname)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
+    # 日志文件放在 trace 文件夹下
     file_handler = logging.FileHandler(
-        f"{log_dir}/{timestamp}_main.log", mode="a", encoding="utf-8"
+        f"{trace_dir}/main.log", mode="a", encoding="utf-8"
     )
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(formatter)
@@ -842,7 +855,7 @@ def main():
     stdout_handler.setLevel(logging.INFO)
     stdout_handler.setFormatter(formatter)
 
-    logger = logging.getLogger("graph_inference")
+    logger = logging.getLogger("graph_inference.main")
     logger.setLevel(logging.INFO)
     logger.addHandler(file_handler)
     logger.addHandler(stdout_handler)
@@ -940,7 +953,7 @@ def main():
         if args.inference_only:
             # 仅运行 warmup 和 inference
             if args.profile_ops:
-                # 运行算子分析
+                # 运行算子分析（仅使用 profile_operator_times，避免重复统计）
                 logger.info("\nRunning inference with operator profiling...")
                 run_inference(
                     graph_def=graph_def,
@@ -953,8 +966,8 @@ def main():
                     inference_rounds=args.warmup_rounds,  # 预热
                     log_device_placement=args.log_device_placement
                 )
+                # profile_operator_times 内部会调用 _print_op_stats_from_run_metadata 打印和保存结果
                 profiler.profile_operator_times(warmup_rounds=3)
-                profiler.print_operator_timings()
             else:
                 result = profiler.run_inference_only(
                     warmup_rounds=args.warmup_rounds,
@@ -966,10 +979,9 @@ def main():
             logger.info(f"Results saved in: {profiler.trace_dir}")
 
         elif args.profile_ops:
-            # 仅分析算子性能
+            # 仅分析算子性能（profile_operator_times 内部已包含打印和保存逻辑）
             logger.info("\nRunning operator profiling...")
             profiler.profile_operator_times(warmup_rounds=args.warmup_rounds)
-            profiler.print_operator_timings()
 
             logger.info(f"\nOperator profiling completed!")
             logger.info(f"Results saved in: {profiler.trace_dir}")
@@ -998,9 +1010,8 @@ def main():
             )
             profiler.print_performance_table(perf_result)
 
-            # 算子性能分析
+            # 算子性能分析（profile_operator_times 内部已包含打印和保存逻辑）
             profiler.profile_operator_times()
-            profiler.print_operator_timings()
 
             logger.info(f"\nComprehensive analysis completed!")
             logger.info(f"Results saved in: {profiler.trace_dir}")
