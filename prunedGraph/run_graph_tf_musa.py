@@ -292,26 +292,120 @@ class GraphProfiler:
             for _ in range(warmup_rounds):
                 sess.run(self.output_tensor, feed_dict=self.feed_dict)
 
-            # 启动 Profiler
+            # 启动 Profiler - 使用 TF1 兼容的 API
             self.logger.info("启动 TensorFlow Profiler...")
             try:
-                options = tf.profiler.experimental.ProfilerOptions(
-                    host_tracer_level=2,
-                    python_tracer_level=0,
-                    device_tracer_level=1
+                # 使用 TF1 的 tf.profiler API
+                run_meta = tf.RunMetadata()
+                run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+
+                # 执行推理并收集 trace 信息
+                self.logger.info("执行推理并收集性能数据...")
+                result = sess.run(
+                    self.output_tensor,
+                    feed_dict=self.feed_dict,
+                    options=run_options,
+                    run_metadata=run_meta
                 )
 
-                tf.profiler.experimental.start(log_dir, options=options)
-                sess.run(self.output_tensor, feed_dict=self.feed_dict)
-                tf.profiler.experimental.stop()
-                self.logger.info("Profiler 完成")
+                # 导出 trace 数据
+                from tensorflow.python.client import timeline
+                timeline_obj = timeline.Timeline(run_meta.step_stats)
+                trace_data = timeline_obj.generate_chrome_trace_format()
+
+                # 保存 trace 数据
+                trace_file = os.path.join(log_dir, f"trace_{self.device_type}_{timestamp}.json")
+                with open(trace_file, 'w') as f:
+                    f.write(trace_data)
+
+                self.logger.info(f"Profiler 完成，trace 数据已保存到：{trace_file}")
+
+                # 解析并打印算子统计信息
+                self._print_op_stats_from_run_metadata(run_meta)
 
             except Exception as e:
                 self.logger.warning(f"Profiler 不可用或出错：{e}")
-                return
+                self.logger.info("尝试使用备用方法收集算子信息...")
+                # 备用方法：直接执行并计时
+                self._profile_with_simple_timing(sess, warmup_rounds)
 
-        # 解析结果
-        self.parse_operator_timings(log_dir)
+    def _print_op_stats_from_run_metadata(self, run_meta: tf.RunMetadata) -> None:
+        """从 RunMetadata 打印算子统计信息
+
+        Args:
+            run_meta: TensorFlow RunMetadata 对象
+        """
+        if not run_meta or not run_meta.step_stats:
+            self.logger.info("无算子性能数据")
+            return
+
+        self.logger.info("\n" + "=" * 80)
+        self.logger.info(f"算子执行时间统计 (Device: {self.device_type})")
+        self.logger.info("=" * 80)
+
+        # 收集算子统计信息
+        op_stats = []
+        for dev_stat in run_meta.step_stats.dev_stats:
+            device_name = dev_stat.device
+            for node_stat in dev_stat.node_stats:
+                op_name = node_stat.node_name
+                # 获取执行时间（微秒转换为毫秒）
+                if node_stat.all_end_rel_micros:
+                    duration_ms = node_stat.all_end_rel_micros / 1000.0
+                    op_stats.append({
+                        'name': op_name,
+                        'device': device_name,
+                        'duration_ms': duration_ms
+                    })
+
+        # 按执行时间排序
+        op_stats.sort(key=lambda x: x['duration_ms'], reverse=True)
+
+        # 使用 prettytable 打印表格
+        if PRETTYTABLE_AVAILABLE and op_stats:
+            print("\n" + "=" * 100)
+            print(f"算子执行时间统计 (Device: {self.device_type}, Top 30 by Duration)")
+            print("=" * 100)
+
+            table = PrettyTable()
+            table.field_names = ["Rank", "Operator Name", "Device", "Duration (ms)"]
+            table.align["Operator Name"] = "l"
+            table.align["Device"] = "l"
+            table.align["Duration (ms)"] = "r"
+
+            for i, stat in enumerate(op_stats[:30], 1):
+                table.add_row([
+                    i,
+                    stat['name'][:45] if len(stat['name']) > 45 else stat['name'],
+                    stat['device'].split('/')[-1] if '/' in stat['device'] else stat['device'],
+                    f"{stat['duration_ms']:.3f}"
+                ])
+
+            print(table)
+
+            if len(op_stats) > 30:
+                print(f"... 还有 {len(op_stats) - 30} 个算子")
+        else:
+            # 降级到普通打印
+            self.logger.info(f"{'Operator Name':<50} {'Device':<20} {'Duration(ms)':<12}")
+            self.logger.info("-" * 80)
+            for stat in op_stats[:30]:
+                device_short = stat['device'].split('/')[-1] if '/' in stat['device'] else stat['device']
+                self.logger.info(f"{stat['name']:<50} {device_short:<20} {stat['duration_ms']:<12.3f}")
+
+        self.logger.info("=" * 80)
+
+        # 保存结果
+        if op_stats:
+            timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
+            op_stats_file = os.path.join(self.trace_dir, f"op_stats_{self.device_type}_{timestamp}.json")
+            with open(op_stats_file, 'w') as f:
+                json.dump({
+                    'device_type': self.device_type,
+                    'operators': op_stats,
+                    'total_operators': len(op_stats)
+                }, f, indent=2)
+            self.logger.info(f"\n算子统计结果已保存到：{op_stats_file}")
 
     def parse_operator_timings(self, log_dir: str) -> None:
         """解析算子时间信息
@@ -451,33 +545,46 @@ class GraphProfiler:
         Args:
             perf_result: 性能分析结果字典
         """
-        if not PRETTYTABLE_AVAILABLE:
-            self.logger.info(f"Average inference time: {perf_result['average_time']:.6f} seconds")
-            self.logger.info(f"Average throughput: {perf_result['average_throughput']:.2f} samples/second")
-            return
+        # Log to logger as well to ensure output is captured
+        self.logger.info("=" * 60)
+        self.logger.info("PERFORMANCE SUMMARY")
+        self.logger.info("=" * 60)
+        self.logger.info(f"Device: {perf_result['device_type']}")
+        self.logger.info(f"Batch Size: {perf_result['batch_size']}")
+        self.logger.info(f"Average Time (s): {perf_result['average_time']:.6f}")
+        self.logger.info(f"Min Time (s): {perf_result['min_time']:.6f}")
+        self.logger.info(f"Max Time (s): {perf_result['max_time']:.6f}")
+        self.logger.info(f"Avg Throughput (samples/s): {perf_result['average_throughput']:.2f}")
+        self.logger.info(f"Max Throughput (samples/s): {perf_result['max_throughput']:.2f}")
+        self.logger.info(f"Min Throughput (samples/s): {perf_result['min_throughput']:.2f}")
+        self.logger.info(f"Std Deviation (s): {perf_result['std_deviation']:.6f}")
+        self.logger.info("=" * 60)
 
-        print("\n" + "=" * 60)
-        print("PERFORMANCE SUMMARY")
-        print("=" * 60)
+        # Also print to stdout for terminal display
+        if PRETTYTABLE_AVAILABLE:
 
-        table = PrettyTable()
-        table.field_names = ["Metric", "Value"]
-        table.align["Metric"] = "l"
-        table.align["Value"] = "r"
+            print("\n" + "=" * 60)
+            print("PERFORMANCE SUMMARY")
+            print("=" * 60)
 
-        table.add_row(["Device", perf_result['device_type']])
-        table.add_row(["Batch Size", perf_result['batch_size']])
-        table.add_row(["Average Time (s)", f"{perf_result['average_time']:.6f}"])
-        table.add_row(["Min Time (s)", f"{perf_result['min_time']:.6f}"])
-        table.add_row(["Max Time (s)", f"{perf_result['max_time']:.6f}"])
-        table.add_row(["Avg Throughput (samples/s)", f"{perf_result['average_throughput']:.2f}"])
-        table.add_row(["Max Throughput (samples/s)", f"{perf_result['max_throughput']:.2f}"])
-        table.add_row(["Min Throughput (samples/s)", f"{perf_result['min_throughput']:.2f}"])
-        table.add_row(["Std Deviation (s)", f"{perf_result['std_deviation']:.6f}"])
+            table = PrettyTable()
+            table.field_names = ["Metric", "Value"]
+            table.align["Metric"] = "l"
+            table.align["Value"] = "r"
 
-        print(table)
-        print("=" * 60)
+            table.add_row(["Device", perf_result['device_type']])
+            table.add_row(["Batch Size", perf_result['batch_size']])
+            table.add_row(["Average Time (s)", f"{perf_result['average_time']:.6f}"])
+            table.add_row(["Min Time (s)", f"{perf_result['min_time']:.6f}"])
+            table.add_row(["Max Time (s)", f"{perf_result['max_time']:.6f}"])
+            table.add_row(["Avg Throughput (samples/s)", f"{perf_result['average_throughput']:.2f}"])
+            table.add_row(["Max Throughput (samples/s)", f"{perf_result['max_throughput']:.2f}"])
+            table.add_row(["Min Throughput (samples/s)", f"{perf_result['min_throughput']:.2f}"])
+            table.add_row(["Std Deviation (s)", f"{perf_result['std_deviation']:.6f}"])
 
+            print(table)
+            print("=" * 60)
+            sys.stdout.flush() # Ensure output is flushed to terminal
 
 def infer_placeholder_shape_from_usage(graph_def: graph_pb2.GraphDef, placeholder_name: str) -> Optional[List[int]]:
     """通过分析图中使用该 Placeholder 的节点来推断其形状
