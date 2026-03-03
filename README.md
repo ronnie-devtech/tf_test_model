@@ -11,6 +11,7 @@ standard_model/
 │   └── logs/                   # 日志和trace文件输出目录
 └── wukong/               # Wukong深度学习模型
     ├── run_wukong_tf_musa.py   # 主要测试脚本  
+    ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
     └── logs/                   # 日志和trace文件输出目录
 ```
 
@@ -36,6 +37,9 @@ python prunedGraph/run_graph_tf_musa.py --inference-only
 
 # wukong模型  
 python wukong/run_wukong_tf_musa.py --inference-only
+
+# 测试 libmusa_plugin.so
+python3 wukong/test_tf_musa_extension.py /path/to/libmusa_plugin.so
 ```
 
 **输出位置**: 
