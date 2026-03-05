@@ -30,13 +30,14 @@ def main():
     with open(args.output, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
         # 写入表头
-        writer.writerow(["name", "device", "duration_ms"])
+        writer.writerow(["name", "device", "duration_ms","op_type"])
         # 写入数据行
         for op in data.get("operators", []):
             writer.writerow([
                 op.get("name", ""),
                 op.get("device", ""),
-                op.get("duration_ms", "")
+                op.get("duration_ms", ""),
+                op.get("op_type", "")
             ])
 
     print(f"转换完成：{args.input} -> {args.output}")

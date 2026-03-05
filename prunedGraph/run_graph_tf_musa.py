@@ -602,6 +602,11 @@ class GraphProfiler:
             self.logger.info("无算子性能数据")
             return
 
+        # 构建 node_name -> op_type 的映射
+        op_type_map = {}
+        for node in self.graph.as_graph_def().node:
+            op_type_map[node.name] = node.op
+
         self.logger.info("\n" + "=" * 80)
         self.logger.info(f"算子执行时间统计 (Device: {self.device_type})")
         self.logger.info("=" * 80)
@@ -613,8 +618,10 @@ class GraphProfiler:
                 op_name = node_stat.node_name
                 if node_stat.all_end_rel_micros:
                     duration_ms = node_stat.all_end_rel_micros / 1000.0
+                    op_type = op_type_map.get(op_name, "unknown")
                     op_stats.append({
                         'name': op_name,
+                        'op_type': op_type,
                         'device': device_name,
                         'duration_ms': duration_ms
                     })
@@ -622,13 +629,14 @@ class GraphProfiler:
         op_stats.sort(key=lambda x: x['duration_ms'], reverse=True)
 
         if PRETTYTABLE_AVAILABLE and op_stats:
-            self.logger.info("\n" + "=" * 100)
+            self.logger.info("\n" + "=" * 110)
             self.logger.info(f"算子执行时间统计 (Device: {self.device_type}, Top 30 by Duration)")
-            self.logger.info("=" * 100)
+            self.logger.info("=" * 110)
 
             table = PrettyTable()
-            table.field_names = ["Rank", "Operator Name", "Device", "Duration (ms)"]
+            table.field_names = ["Rank", "Operator Name", "Op Type", "Device", "Duration (ms)"]
             table.align["Operator Name"] = "l"
+            table.align["Op Type"] = "l"
             table.align["Device"] = "l"
             table.align["Duration (ms)"] = "r"
 
@@ -636,6 +644,7 @@ class GraphProfiler:
                 table.add_row([
                     i,
                     stat['name'][:45] if len(stat['name']) > 45 else stat['name'],
+                    stat['op_type'],
                     stat['device'].split('/')[-1] if '/' in stat['device'] else stat['device'],
                     f"{stat['duration_ms']:.3f}"
                 ])
@@ -645,26 +654,80 @@ class GraphProfiler:
 
             if len(op_stats) > 30:
                 self.logger.info(f"... 还有 {len(op_stats) - 30} 个算子")
+
+            # 按 op_type 汇总统计
+            op_type_stats = collections.defaultdict(lambda: {'total_ms': 0.0, 'count': 0})
+            for stat in op_stats:
+                op_type_stats[stat['op_type']]['total_ms'] += stat['duration_ms']
+                op_type_stats[stat['op_type']]['count'] += 1
+
+            sorted_type_stats = sorted(op_type_stats.items(),
+                                       key=lambda x: x[1]['total_ms'], reverse=True)
+
+            self.logger.info("\n" + "=" * 80)
+            self.logger.info(f"按算子类型汇总 (Device: {self.device_type})")
+            self.logger.info("=" * 80)
+
+            type_table = PrettyTable()
+            type_table.field_names = ["Rank", "Op Type", "Count", "Total Time (ms)", "Avg Time (ms)", "Ratio"]
+            type_table.align["Op Type"] = "l"
+            type_table.align["Count"] = "r"
+            type_table.align["Total Time (ms)"] = "r"
+            type_table.align["Avg Time (ms)"] = "r"
+            type_table.align["Ratio"] = "r"
+
+            total_time = sum(s['total_ms'] for _, s in sorted_type_stats) or 1.0
+            for i, (op_type, stats) in enumerate(sorted_type_stats[:30], 1):
+                ratio = stats['total_ms'] / total_time
+                type_table.add_row([
+                    i,
+                    op_type,
+                    stats['count'],
+                    f"{stats['total_ms']:.3f}",
+                    f"{stats['total_ms'] / stats['count']:.3f}",
+                    f"{ratio:.2%}"
+                ])
+
+            for line in type_table.get_string().split('\n'):
+                self.logger.info(line)
+
         else:
-            self.logger.info(f"{'Operator Name':<50} {'Device':<20} {'Duration(ms)':<12}")
-            self.logger.info("-" * 80)
+            self.logger.info(f"{'Operator Name':<45} {'Op Type':<20} {'Device':<20} {'Duration(ms)':<12}")
+            self.logger.info("-" * 100)
             for stat in op_stats[:30]:
                 device_short = stat['device'].split('/')[-1] if '/' in stat['device'] else stat['device']
-                self.logger.info(f"{stat['name']:<50} {device_short:<20} {stat['duration_ms']:<12.3f}")
+                self.logger.info(f"{stat['name']:<45} {stat['op_type']:<20} {device_short:<20} {stat['duration_ms']:<12.3f}")
 
         self.logger.info("=" * 80)
 
         if op_stats and not self.operator_timings:
             timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
             op_stats_file = os.path.join(self.trace_dir, f"op_stats_{self.device_type}_{timestamp}.json")
+
+            # 按 op_type 汇总数据也保存到文件
+            op_type_summary = collections.defaultdict(lambda: {'total_ms': 0.0, 'count': 0})
+            for stat in op_stats:
+                op_type_summary[stat['op_type']]['total_ms'] += stat['duration_ms']
+                op_type_summary[stat['op_type']]['count'] += 1
+
+            sorted_summary = sorted(op_type_summary.items(),
+                                    key=lambda x: x[1]['total_ms'], reverse=True)
+
             with open(op_stats_file, 'w') as f:
                 json.dump({
                     'device_type': self.device_type,
                     'operators': op_stats,
-                    'total_operators': len(op_stats)
+                    'total_operators': len(op_stats),
+                    'op_type_summary': [
+                        {
+                            'op_type': op_type,
+                            'count': s['count'],
+                            'total_time_ms': round(s['total_ms'], 3),
+                            'avg_time_ms': round(s['total_ms'] / s['count'], 3)
+                        } for op_type, s in sorted_summary
+                    ]
                 }, f, indent=2)
             self.logger.info(f"\n算子统计结果已保存到：{op_stats_file}")
-
     def parse_operator_timings(self, log_dir: str) -> None:
         """解析算子时间信息"""
         self.logger.info("\n解析算子性能数据...")
