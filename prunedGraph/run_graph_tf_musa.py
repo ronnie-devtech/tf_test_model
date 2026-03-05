@@ -375,6 +375,15 @@ class GraphProfiler:
 
     def __init__(self, graph: tf.Graph, feed_dict: Dict, output_tensor: tf.Tensor,
                  batch_size: int = 100, device_type: str = "MUSA"):
+        """初始化性能分析器
+
+        Args:
+            graph: TensorFlow 图对象
+            feed_dict: 输入数据字典
+            output_tensor: 输出张量
+            batch_size: 批次大小
+            device_type: 设备类型 (CPU/MUSA/CUDA)
+        """
         self.graph = graph
         self.feed_dict = feed_dict
         self.output_tensor = output_tensor
@@ -395,6 +404,10 @@ class GraphProfiler:
         config = tf.ConfigProto()
         config.allow_soft_placement = True
         config.log_device_placement = False
+        
+        # 配置 GPU/CUDA 选项
+        if self.device_type == "CUDA":
+            config.gpu_options.allow_growth = True
 
         with tf.compat.v1.Session(graph=self.graph, config=config) as sess:
             self.logger.info("\nStarting warmup rounds...")
@@ -466,6 +479,10 @@ class GraphProfiler:
         config = tf.ConfigProto()
         config.allow_soft_placement = True
         config.log_device_placement = False
+        
+        # 配置 GPU/CUDA 选项
+        if self.device_type == "CUDA":
+            config.gpu_options.allow_growth = True
 
         with tf.compat.v1.Session(graph=self.graph, config=config) as sess:
             self.logger.info(f"\n预热阶段：{warmup_rounds} 轮...")
@@ -536,6 +553,10 @@ class GraphProfiler:
         config = tf.ConfigProto()
         config.allow_soft_placement = True
         config.log_device_placement = False
+        
+        # 配置 GPU/CUDA 选项
+        if self.device_type == "CUDA":
+            config.gpu_options.allow_growth = True
 
         timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
         log_dir = os.path.join(self.trace_dir, f"ops_profile_{self.device_type}_{timestamp}")
@@ -954,6 +975,11 @@ def run_inference(graph_def: graph_pb2.GraphDef, feed_dict: Dict, output_node_na
         logger.info(f"MUSA devices available: {len(musa_devices)}")
         if not musa_devices:
             logger.warning("!!!! 警告：未检测到 MUSA 设备，将回退到 CPU 运行")
+    elif device_type == "CUDA":
+        gpu_devices = tf.config.list_physical_devices('GPU')
+        logger.info(f"CUDA GPU devices available: {len(gpu_devices)}")
+        if not gpu_devices:
+            logger.warning("!!!! 警告：未检测到 CUDA GPU 设备，将回退到 CPU 运行")
 
     with tf.Graph().as_default() as graph:
         tf.import_graph_def(graph_def, name="")
@@ -975,12 +1001,19 @@ def run_inference(graph_def: graph_pb2.GraphDef, feed_dict: Dict, output_node_na
         config = tf.ConfigProto()
         config.allow_soft_placement = True
         config.log_device_placement = log_device_placement
+        
+        # 配置 GPU/CUDA 选项
+        if device_type == "CUDA":
+            config.gpu_options.allow_growth = True
 
         with tf.compat.v1.Session(graph=graph, config=config) as sess:
             try:
                 logger.info(">>> Session Run Start...")
                 if device_type == "MUSA":
                     with tf.device("/device:MUSA:0"):
+                        result = sess.run(output_tensor, feed_dict=session_feed_dict)
+                elif device_type == "CUDA":
+                    with tf.device("/GPU:0"):
                         result = sess.run(output_tensor, feed_dict=session_feed_dict)
                 else:
                     result = sess.run(output_tensor, feed_dict=session_feed_dict)
@@ -1012,12 +1045,15 @@ def main():
     logger = log_mgr.get_logger("main")
 
     parser = argparse.ArgumentParser(
-        description='Graph Def TensorFlow 推理脚本 - 支持 CPU/MUSA 设备性能对比',
+        description='Graph Def TensorFlow 推理脚本 - 支持 CPU/MUSA/CUDA 设备性能对比',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法:
   # 在 MUSA 设备上运行（完整分析）
   python run_graph_tf_musa.py --device musa
+
+  # 在 CUDA GPU 上运行（完整分析）
+  python run_graph_tf_musa.py --device cuda
 
   # 在 CPU 上运行（用于性能对比）
   python run_graph_tf_musa.py --device cpu
@@ -1055,8 +1091,8 @@ def main():
                         help=f'输出节点名称，默认：{DEFAULT_OUTPUT_NODE_NAME}')
     parser.add_argument('--batch-size', type=int, default=DEFAULT_BATCH_SIZE,
                         help=f'批次大小，默认：{DEFAULT_BATCH_SIZE}')
-    parser.add_argument('--device', type=str, choices=['cpu', 'musa'], default='musa',
-                        help='运行设备：cpu 或 musa，默认：musa')
+    parser.add_argument('--device', type=str, choices=['cpu', 'musa', 'cuda'], default='musa',
+                        help='运行设备：cpu、musa 或 cuda，默认：musa')
     parser.add_argument('--musa-plugin', type=str, default=DEFAULT_MUSA_PLUGIN_PATH,
                         help=f'MUSA 插件路径，默认：{DEFAULT_MUSA_PLUGIN_PATH}')
     parser.add_argument('--log-device-placement', action='store_true',
