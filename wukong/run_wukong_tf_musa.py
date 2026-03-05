@@ -735,6 +735,193 @@ class InferenceProfiler:
 
         return analysis_result
 
+class AccuracyComparator:
+    """CPU vs MUSA 精度对比器（Wukong 模型）"""
+
+    def __init__(self, profiler: InferenceProfiler):
+        self.profiler = profiler
+        self.logger = profiler.logger
+        self.trace_dir = profiler.trace_dir
+
+    def run_on_device(self, device_type: str, warmup_rounds: int = 2) -> np.ndarray:
+        """在指定设备上运行推理并返回结果"""
+        self.logger.info(f"  在 {device_type} 上运行推理...")
+
+        inputs = (self.profiler.test_sparse, self.profiler.test_dense)
+
+        device_str = f"/device:{device_type}:0" if device_type == "MUSA" else "/CPU:0"
+
+        # 预热
+        for _ in range(warmup_rounds):
+            with tf.device(device_str):
+                _ = self.profiler.model(inputs, training=False)
+
+        # 正式推理
+        with tf.device(device_str):
+            result = self.profiler.model(inputs, training=False)
+
+        result_np = result.numpy()
+        self.logger.info(f"  {device_type} 推理完成, shape={result_np.shape}, dtype={result_np.dtype}")
+        return result_np
+
+    def compare_results(self, cpu_result: np.ndarray, musa_result: np.ndarray,
+                        rtol: float = 1e-5, atol: float = 1e-6) -> Dict[str, Any]:
+        """比较 CPU 和 MUSA 的推理结果"""
+        report = {
+            'cpu_shape': list(cpu_result.shape),
+            'musa_shape': list(musa_result.shape),
+            'cpu_dtype': str(cpu_result.dtype),
+            'musa_dtype': str(musa_result.dtype),
+            'rtol': rtol,
+            'atol': atol,
+        }
+
+        if cpu_result.shape != musa_result.shape:
+            report['shape_match'] = False
+            report['passed'] = False
+            report['error'] = f"Shape 不匹配: CPU={cpu_result.shape}, MUSA={musa_result.shape}"
+            return report
+        report['shape_match'] = True
+
+        cpu_f64 = cpu_result.astype(np.float64)
+        musa_f64 = musa_result.astype(np.float64)
+
+        # 绝对误差
+        abs_diff = np.abs(cpu_f64 - musa_f64)
+        report['max_abs_diff'] = float(np.max(abs_diff))
+        report['mean_abs_diff'] = float(np.mean(abs_diff))
+        report['median_abs_diff'] = float(np.median(abs_diff))
+
+        # 相对误差
+        denom = np.maximum(np.abs(cpu_f64), 1e-12)
+        rel_diff = abs_diff / denom
+        report['max_rel_diff'] = float(np.max(rel_diff))
+        report['mean_rel_diff'] = float(np.mean(rel_diff))
+        report['median_rel_diff'] = float(np.median(rel_diff))
+
+        # allclose
+        report['allclose'] = bool(np.allclose(cpu_f64, musa_f64, rtol=rtol, atol=atol))
+
+        # 不匹配元素
+        mismatch_mask = ~np.isclose(cpu_f64, musa_f64, rtol=rtol, atol=atol)
+        num_mismatch = int(np.sum(mismatch_mask))
+        total_elements = int(cpu_f64.size)
+        report['num_mismatch'] = num_mismatch
+        report['total_elements'] = total_elements
+        report['mismatch_ratio'] = num_mismatch / total_elements if total_elements > 0 else 0.0
+
+        # 数值统计
+        report['cpu_stats'] = {
+            'min': float(np.min(cpu_f64)), 'max': float(np.max(cpu_f64)),
+            'mean': float(np.mean(cpu_f64)), 'std': float(np.std(cpu_f64)),
+        }
+        report['musa_stats'] = {
+            'min': float(np.min(musa_f64)), 'max': float(np.max(musa_f64)),
+            'mean': float(np.mean(musa_f64)), 'std': float(np.std(musa_f64)),
+        }
+
+        # 余弦相似度
+        cpu_flat = cpu_f64.flatten()
+        musa_flat = musa_f64.flatten()
+        norm_cpu = np.linalg.norm(cpu_flat)
+        norm_musa = np.linalg.norm(musa_flat)
+        if norm_cpu > 0 and norm_musa > 0:
+            report['cosine_similarity'] = float(np.dot(cpu_flat, musa_flat) / (norm_cpu * norm_musa))
+        else:
+            report['cosine_similarity'] = 1.0 if np.allclose(cpu_flat, musa_flat) else 0.0
+
+        # 分档通过率
+        thresholds = [1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2]
+        report['threshold_pass_rates'] = {}
+        for t in thresholds:
+            pass_count = int(np.sum(np.isclose(cpu_f64, musa_f64, rtol=t, atol=t)))
+            report['threshold_pass_rates'][str(t)] = pass_count / total_elements if total_elements > 0 else 1.0
+
+        report['passed'] = report['allclose']
+        return report
+
+    def print_report(self, report: Dict[str, Any]) -> None:
+        """打印精度对比报告"""
+        self.logger.info("")
+        self.logger.info("=" * 80)
+        self.logger.info("  CPU vs MUSA 精度对比报告")
+        self.logger.info("=" * 80)
+
+        passed_str = "✅ PASSED" if report.get('passed') else "❌ FAILED"
+        self.logger.info(f"  结果: {passed_str}")
+        self.logger.info(f"  CPU  Shape: {report['cpu_shape']}, Dtype: {report['cpu_dtype']}")
+        self.logger.info(f"  MUSA Shape: {report['musa_shape']}, Dtype: {report['musa_dtype']}")
+        self.logger.info(f"  容差: rtol={report['rtol']}, atol={report['atol']}")
+
+        if not report.get('shape_match'):
+            self.logger.error(f"  错误: {report.get('error')}")
+            return
+
+        self.logger.info("")
+        self.logger.info(f"  {'指标':<20} {'值':>15}")
+        self.logger.info(f"  {'-'*36}")
+        self.logger.info(f"  {'最大绝对误差':<20} {report['max_abs_diff']:>15.2e}")
+        self.logger.info(f"  {'平均绝对误差':<20} {report['mean_abs_diff']:>15.2e}")
+        self.logger.info(f"  {'中位绝对误差':<20} {report['median_abs_diff']:>15.2e}")
+        self.logger.info(f"  {'最大相对误差':<20} {report['max_rel_diff']:>15.2e}")
+        self.logger.info(f"  {'平均相对误差':<20} {report['mean_rel_diff']:>15.2e}")
+        self.logger.info(f"  {'余弦相似度':<20} {report['cosine_similarity']:>15.10f}")
+        self.logger.info(f"  {'np.allclose':<20} {str(report['allclose']):>15}")
+        self.logger.info(f"  {'不匹配元素':<20} {report['num_mismatch']:>10} / {report['total_elements']}")
+        self.logger.info(f"  {'不匹配比例':<20} {report['mismatch_ratio']:>15.6%}")
+
+        # self.logger.info("")
+        # self.logger.info("  各容差阈值下的通过率:")
+        # for t_str, rate in report['threshold_pass_rates'].items():
+        #     self.logger.info(f"    阈值 {t_str:>8}: {rate:.6%}")
+
+        self.logger.info("")
+        self.logger.info("  数值分布对比:")
+        self.logger.info(f"  {'统计量':<8} {'CPU':>14} {'MUSA':>14} {'差异':>14}")
+        self.logger.info(f"  {'-'*52}")
+        for key in ['min', 'max', 'mean', 'std']:
+            cpu_val = report['cpu_stats'][key]
+            musa_val = report['musa_stats'][key]
+            diff = abs(cpu_val - musa_val)
+            self.logger.info(f"  {key:<8} {cpu_val:>14.6f} {musa_val:>14.6f} {diff:>14.2e}")
+
+        self.logger.info("=" * 80)
+
+    def run_comparison(self, rtol: float = 1e-5, atol: float = 1e-6,
+                       warmup_rounds: int = 2) -> Dict[str, Any]:
+        """执行完整的 CPU vs MUSA 精度对比"""
+        self.logger.info("=" * 80)
+        self.logger.info("  CPU vs MUSA 精度对比验证 (Wukong Model)")
+        self.logger.info("=" * 80)
+
+        try:
+            cpu_result = self.run_on_device("CPU", warmup_rounds)
+        except Exception as e:
+            self.logger.error(f"CPU 推理失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return {'passed': False, 'error': f'CPU inference failed: {e}'}
+
+        try:
+            musa_result = self.run_on_device("MUSA", warmup_rounds)
+        except Exception as e:
+            self.logger.error(f"MUSA 推理失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return {'passed': False, 'error': f'MUSA inference failed: {e}'}
+
+        report = self.compare_results(cpu_result, musa_result, rtol=rtol, atol=atol)
+        self.print_report(report)
+
+        # 保存报告
+        timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
+        filepath = os.path.join(self.trace_dir, f"accuracy_comparison_{timestamp}.json")
+        with open(filepath, 'w') as f:
+            json.dump(report, f, indent=2)
+        self.logger.info(f"  精度对比报告已保存到: {filepath}")
+
+        return report
+
 def main():
     """主函数"""
     if not TF_AVAILABLE:
@@ -766,6 +953,12 @@ def main():
                         help='Run only warmup and inference cycles without other analysis')
     parser.add_argument('--profile-ops', action='store_true',
                         help='Profile individual operator execution times')
+    parser.add_argument('--compare-accuracy', action='store_true',
+                        help='运行 CPU vs MUSA 精度对比验证')
+    parser.add_argument('--rtol', type=float, default=1e-2,
+                        help='精度对比的相对容差 (default: 1e-2)')
+    parser.add_argument('--atol', type=float, default=1e-2,
+                        help='精度对比的绝对容差 (default: 1e-2)')
     parser.add_argument('--batch-size', type=int, default=1024,
                         help='Batch size for inference (default: 1024)')
     parser.add_argument('--warmup-rounds', type=int, default=5,
@@ -782,12 +975,15 @@ def main():
     args = parser.parse_args()
 
     # 加载 MUSA 插件（仅在 device=musa 时需要）
-    if args.device == 'musa':
+    if args.device == 'musa' or args.compare_accuracy:
         try:
             tf.load_library(args.musa_plugin)
             logger.info(f">>>> [MUSA] Plugin loaded successfully from: {args.musa_plugin}")
         except Exception as e:
             logger.error(f"!!!! [MUSA] Failed to load plugin: {e}")
+            if args.compare_accuracy:
+                logger.error("精度对比模式需要 MUSA 插件，退出")
+                return
     else:
         logger.info("Running on CPU, MUSA plugin not loaded")
 
@@ -796,9 +992,33 @@ def main():
 
     # 创建推理分析器
     profiler = InferenceProfiler(batch_size=args.batch_size, device_type=args.device)
-
-    # Set profile_ops flag based on command line argument
     profiler.profile_ops = args.profile_ops
+
+    # ==========================================
+    # 精度对比模式
+    # ==========================================
+    if args.compare_accuracy:
+        logger.info("\n" + "=" * 80)
+        logger.info("  运行模式: CPU vs MUSA 精度对比验证 (Wukong)")
+        logger.info("=" * 80)
+
+        comparator = AccuracyComparator(profiler)
+        report = comparator.run_comparison(
+            rtol=args.rtol,
+            atol=args.atol,
+            warmup_rounds=args.warmup_rounds
+        )
+
+        if report.get('passed'):
+            logger.info("\n🎉 精度对比通过！CPU 与 MUSA 结果一致。")
+        else:
+            logger.warning("\n⚠️  精度对比未通过，请检查报告中的详细信息。")
+
+        logger.info(f"结果保存在: {profiler.trace_dir}")
+
+        # 如果未指定其他模式则直接返回
+        if not args.inference_only and not args.profile_ops:
+            return
 
     if args.inference_only:
         # 仅运行 warmup 和 inference
