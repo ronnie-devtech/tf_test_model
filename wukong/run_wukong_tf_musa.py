@@ -18,7 +18,7 @@ import collections
 
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-
+from tf_test_model.utils import get_log_manager
 
 try:
     import tensorflow as tf
@@ -49,41 +49,13 @@ class InferenceProfiler:
 
         self.batch_size = batch_size
         self.device_type = device_type.upper()
-        self.setup_logging()
+        self.log_mgr = get_log_manager("wukong_inference")
+        self.logger = self.log_mgr.get_logger("profiler", "inference.log")
+        self.trace_dir = self.log_mgr.trace_dir
         self.setup_model_and_data()
         self.profile_ops = False  # Flag to enable operator profiling
         self.operator_timings = collections.defaultdict(list)  # Store operator timing data
 
-    def setup_logging(self):
-        """设置日志记录"""
-        log_dir = "logs/tensorflow_inference"
-        os.makedirs(log_dir, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
-
-        # 先创建 trace_dir，日志文件都放在 trace 文件夹下
-        self.trace_dir = f"{log_dir}/{timestamp}_trace"
-        os.makedirs(self.trace_dir, exist_ok=True)
-
-        formatter = logging.Formatter(
-            fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
-
-        # 日志文件放在 trace 文件夹下
-        file_handler = logging.FileHandler(
-            f"{self.trace_dir}/inference.log", mode="a", encoding="utf-8"
-        )
-        file_handler.setLevel(logging.INFO)
-        file_handler.setFormatter(formatter)
-
-        stdout_handler = logging.StreamHandler(sys.stdout)
-        stdout_handler.setLevel(logging.INFO)
-        stdout_handler.setFormatter(formatter)
-
-        self.logger = logging.getLogger("wukong_inference.profiler")
-        self.logger.setLevel(logging.INFO)
-        self.logger.addHandler(file_handler)
-        self.logger.addHandler(stdout_handler)
 
     def setup_model_and_data(self):
         """设置模型和测试数据"""
@@ -513,10 +485,7 @@ class InferenceProfiler:
             'batch_size': self.batch_size
         }
 
-        perf_file = os.path.join(self.trace_dir, "performance_result.json")
-        with open(perf_file, 'w') as f:
-            json.dump(perf_result, f, indent=2)
-
+        perf_file = self.log_mgr.save_json("performance_result.json", perf_result)
         self.logger.info(f"Performance results saved to: {perf_file}")
 
         return perf_result
@@ -773,34 +742,9 @@ def main():
         return
 
     # 设置根日志（在创建 InferenceProfiler 之前）
-    log_dir = "logs/tensorflow_inference"
-    os.makedirs(log_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
+    log_mgr = get_log_manager("wukong_inference")
+    logger = log_mgr.get_logger("main")
 
-    # 先创建 trace_dir，日志文件都放在 trace 文件夹下
-    trace_dir = f"{log_dir}/{timestamp}_trace"
-    os.makedirs(trace_dir, exist_ok=True)
-
-    formatter = logging.Formatter(
-        fmt="%(asctime)s | %(levelname)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    # 日志文件放在 trace 文件夹下
-    file_handler = logging.FileHandler(
-        f"{trace_dir}/main.log", mode="a", encoding="utf-8"
-    )
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(formatter)
-
-    stdout_handler = logging.StreamHandler(sys.stdout)
-    stdout_handler.setLevel(logging.INFO)
-    stdout_handler.setFormatter(formatter)
-
-    logger = logging.getLogger("wukong_inference.main")
-    logger.setLevel(logging.INFO)
-    logger.addHandler(file_handler)
-    logger.addHandler(stdout_handler)
 
     # 解析命令行参数
     parser = argparse.ArgumentParser(
@@ -830,7 +774,7 @@ def main():
                         help='Number of inference rounds (default: 20)')
     parser.add_argument('--device', type=str, choices=['cpu', 'musa'], default='musa',
                         help='Device to run inference: cpu or musa (default: musa)')
-    parser.add_argument('--musa-plugin', type=str, default='../../tensorflow_musa_extension/build/libmusa_plugin.so',
+    parser.add_argument('--musa-plugin', type=str, default='/workspace/tensorflow_musa_extension/build/libmusa_plugin.so',
                         help='Path to MUSA plugin library')
     parser.add_argument('--log-device-placement', action='store_true',
                         help='Log device placement for each operation (default: False)')

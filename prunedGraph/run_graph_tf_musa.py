@@ -16,9 +16,11 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional
 import collections
 
+
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
+from tf_test_model.utils import get_log_manager
 from tensorflow.core.framework import graph_pb2
 import numpy as np
 
@@ -37,10 +39,10 @@ tf.disable_eager_execution()
 # ==========================================
 # 全局配置
 # ==========================================
-DEFAULT_MODEL_PATH = "./graph_def.pb"
+DEFAULT_MODEL_PATH = "/workspace/tf_test_model/prunedGraph/graph_def.pb"
 DEFAULT_BATCH_SIZE = 100
 DEFAULT_OUTPUT_NODE_NAME = "predicts"
-DEFAULT_MUSA_PLUGIN_PATH = "../../tensorflow_musa_extension/build/libmusa_plugin.so"
+DEFAULT_MUSA_PLUGIN_PATH = "/workspace/tensorflow_musa_extension/build/libmusa_plugin.so"
 DEFAULT_WARMUP_ROUNDS = 5
 DEFAULT_INFERENCE_ROUNDS = 20
 
@@ -65,38 +67,40 @@ class GraphProfiler:
         self.batch_size = batch_size
         self.device_type = device_type.upper()
         self.operator_timings = collections.defaultdict(list)
-        self.setup_logging()
+        self.log_mgr = get_log_manager("graph_inference")
+        self.logger = self.log_mgr.get_logger("profiler", "inference.log")
+        self.trace_dir = self.log_mgr.trace_dir
 
-    def setup_logging(self):
-        """设置日志记录"""
-        log_dir = "logs/graph_inference"
-        os.makedirs(log_dir, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
+    # def setup_logging(self):
+    #     """设置日志记录"""
+    #     log_dir = "logs/graph_inference"
+    #     os.makedirs(log_dir, exist_ok=True)
+    #     timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
 
-        # 先创建 trace_dir，日志文件都放在 trace 文件夹下
-        self.trace_dir = f"{log_dir}/{timestamp}_trace"
-        os.makedirs(self.trace_dir, exist_ok=True)
+    #     # 先创建 trace_dir，日志文件都放在 trace 文件夹下
+    #     self.trace_dir = f"{log_dir}/{timestamp}_trace"
+    #     os.makedirs(self.trace_dir, exist_ok=True)
 
-        formatter = logging.Formatter(
-            fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
+    #     formatter = logging.Formatter(
+    #         fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    #         datefmt="%Y-%m-%d %H:%M:%S",
+    #     )
 
-        # 日志文件放在 trace 文件夹下
-        file_handler = logging.FileHandler(
-            f"{self.trace_dir}/inference.log", mode="a", encoding="utf-8"
-        )
-        file_handler.setLevel(logging.INFO)
-        file_handler.setFormatter(formatter)
+    #     # 日志文件放在 trace 文件夹下
+    #     file_handler = logging.FileHandler(
+    #         f"{self.trace_dir}/inference.log", mode="a", encoding="utf-8"
+    #     )
+    #     file_handler.setLevel(logging.INFO)
+    #     file_handler.setFormatter(formatter)
 
-        stdout_handler = logging.StreamHandler(sys.stdout)
-        stdout_handler.setLevel(logging.INFO)
-        stdout_handler.setFormatter(formatter)
+    #     stdout_handler = logging.StreamHandler(sys.stdout)
+    #     stdout_handler.setLevel(logging.INFO)
+    #     stdout_handler.setFormatter(formatter)
 
-        self.logger = logging.getLogger("graph_inference.profiler")
-        self.logger.setLevel(logging.INFO)
-        self.logger.addHandler(file_handler)
-        self.logger.addHandler(stdout_handler)
+    #     self.logger = logging.getLogger("graph_inference.profiler")
+    #     self.logger.setLevel(logging.INFO)
+    #     self.logger.addHandler(file_handler)
+    #     self.logger.addHandler(stdout_handler)
 
     def run_inference_only(self, warmup_rounds: int = 5, inference_rounds: int = 20) -> Dict[str, Any]:
         """仅运行 warmup 和 inference，不进行其他分析
@@ -180,11 +184,10 @@ class GraphProfiler:
             'batch_size': self.batch_size
         }
 
-        timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
-        perf_file = os.path.join(self.trace_dir, f"inference_only_result_{self.device_type}_{timestamp}.json")
-        with open(perf_file, 'w') as f:
-            json.dump(perf_result, f, indent=2)
-
+        filename = self.log_mgr.get_timestamped_filename(
+            f"inference_only_result_{self.device_type}"
+        )
+        perf_file = self.log_mgr.save_json(filename, perf_result)
         self.logger.info(f"\nResults saved to: {perf_file}")
 
         return perf_result
@@ -855,34 +858,9 @@ def run_inference(graph_def: graph_pb2.GraphDef, feed_dict: Dict, output_node_na
 def main():
     """主函数"""
     # 设置根日志
-    log_dir = "logs/graph_inference"
-    os.makedirs(log_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
+    log_mgr = get_log_manager("graph_inference")
+    logger = log_mgr.get_logger("main")
 
-    # 先创建 trace_dir，日志文件都放在 trace 文件夹下
-    trace_dir = f"{log_dir}/{timestamp}_trace"
-    os.makedirs(trace_dir, exist_ok=True)
-
-    formatter = logging.Formatter(
-        fmt="%(asctime)s | %(levelname)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    # 日志文件放在 trace 文件夹下
-    file_handler = logging.FileHandler(
-        f"{trace_dir}/main.log", mode="a", encoding="utf-8"
-    )
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(formatter)
-
-    stdout_handler = logging.StreamHandler(sys.stdout)
-    stdout_handler.setLevel(logging.INFO)
-    stdout_handler.setFormatter(formatter)
-
-    logger = logging.getLogger("graph_inference.main")
-    logger.setLevel(logging.INFO)
-    logger.addHandler(file_handler)
-    logger.addHandler(stdout_handler)
 
     # 解析命令行参数
     parser = argparse.ArgumentParser(
