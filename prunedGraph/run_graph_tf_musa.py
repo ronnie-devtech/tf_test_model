@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 Graph Def 推理脚本
-支持从 pb 文件加载图模型并在 CPU、MUSA 或 CUDA 设备上运行推理
-支持 CPU/MUSA/CUDA 设备性能对比
+支持从 pb 文件加载图模型并在 CPU 或 MUSA 设备上运行推理
+支持 CPU/MUSA 设备性能对比
+支持 CPU/MUSA 精度对比验证
 """
 
 import os
@@ -47,6 +48,328 @@ DEFAULT_WARMUP_ROUNDS = 5
 DEFAULT_INFERENCE_ROUNDS = 20
 
 
+# ==========================================
+# 精度对比工具
+# ==========================================
+class AccuracyComparator:
+    """CPU vs MUSA 精度对比器"""
+
+    def __init__(self, logger: logging.Logger, trace_dir: str):
+        self.logger = logger
+        self.trace_dir = trace_dir
+
+    def run_on_device(self, graph_def: graph_pb2.GraphDef, feed_dict: Dict,
+                      output_node_name: str, device_type: str,
+                      warmup_rounds: int = 2) -> Optional[np.ndarray]:
+        """在指定设备上运行推理并返回结果
+
+        Args:
+            graph_def: 图定义
+            feed_dict: 输入数据字典 (key 为 "name:0" 字符串)
+            output_node_name: 输出节点名称
+            device_type: "CPU" 或 "MUSA"
+            warmup_rounds: 预热轮数
+
+        Returns:
+            推理结果 ndarray，失败返回 None
+        """
+        self.logger.info(f"  在 {device_type} 上运行推理...")
+
+        with tf.Graph().as_default() as graph:
+            tf.import_graph_def(graph_def, name="")
+
+            session_feed_dict = {}
+            for name, data in feed_dict.items():
+                try:
+                    tensor = graph.get_tensor_by_name(name)
+                    session_feed_dict[tensor] = data
+                except KeyError:
+                    pass
+
+            try:
+                output_tensor = graph.get_tensor_by_name(f"{output_node_name}:0")
+            except KeyError:
+                self.logger.error(f"  找不到输出张量 {output_node_name}:0")
+                return None
+
+            config = tf.ConfigProto()
+            config.allow_soft_placement = True
+            config.log_device_placement = False
+
+            with tf.compat.v1.Session(graph=graph, config=config) as sess:
+                try:
+                    # 预热
+                    for _ in range(warmup_rounds):
+                        if device_type == "MUSA":
+                            with tf.device("/device:MUSA:0"):
+                                sess.run(output_tensor, feed_dict=session_feed_dict)
+                        else:
+                            with tf.device("/device:CPU:0"):
+                                sess.run(output_tensor, feed_dict=session_feed_dict)
+
+                    # 正式推理
+                    if device_type == "MUSA":
+                        with tf.device("/device:MUSA:0"):
+                            result = sess.run(output_tensor, feed_dict=session_feed_dict)
+                    else:
+                        with tf.device("/device:CPU:0"):
+                            result = sess.run(output_tensor, feed_dict=session_feed_dict)
+
+                    self.logger.info(f"  {device_type} 推理完成, shape={result.shape}, dtype={result.dtype}")
+                    return result
+
+                except Exception as e:
+                    self.logger.error(f"  {device_type} 推理失败: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    return None
+
+    def compare_results(self, cpu_result: np.ndarray, musa_result: np.ndarray,
+                        rtol: float = 1e-5, atol: float = 1e-6) -> Dict[str, Any]:
+        """比较 CPU 和 MUSA 的推理结果
+
+        Args:
+            cpu_result: CPU 推理结果
+            musa_result: MUSA 推理结果
+            rtol: 相对容差
+            atol: 绝对容差
+
+        Returns:
+            精度对比结果字典
+        """
+        report = {
+            'cpu_shape': list(cpu_result.shape),
+            'musa_shape': list(musa_result.shape),
+            'cpu_dtype': str(cpu_result.dtype),
+            'musa_dtype': str(musa_result.dtype),
+            'rtol': rtol,
+            'atol': atol,
+        }
+
+        # 1. Shape 检查
+        if cpu_result.shape != musa_result.shape:
+            report['shape_match'] = False
+            report['passed'] = False
+            report['error'] = f"Shape 不匹配: CPU={cpu_result.shape}, MUSA={musa_result.shape}"
+            return report
+        report['shape_match'] = True
+
+        # 2. 统一为 float64 进行精度比较
+        cpu_f64 = cpu_result.astype(np.float64)
+        musa_f64 = musa_result.astype(np.float64)
+
+        # 3. 逐元素绝对误差
+        abs_diff = np.abs(cpu_f64 - musa_f64)
+        report['max_abs_diff'] = float(np.max(abs_diff))
+        report['mean_abs_diff'] = float(np.mean(abs_diff))
+        report['median_abs_diff'] = float(np.median(abs_diff))
+
+        # 4. 逐元素相对误差（避免除零）
+        denom = np.maximum(np.abs(cpu_f64), 1e-12)
+        rel_diff = abs_diff / denom
+        report['max_rel_diff'] = float(np.max(rel_diff))
+        report['mean_rel_diff'] = float(np.mean(rel_diff))
+        report['median_rel_diff'] = float(np.median(rel_diff))
+
+        # 5. numpy allclose 检查
+        report['allclose'] = bool(np.allclose(cpu_f64, musa_f64, rtol=rtol, atol=atol))
+
+        # 6. 不满足容差的元素统计
+        mismatch_mask = ~np.isclose(cpu_f64, musa_f64, rtol=rtol, atol=atol)
+        num_mismatch = int(np.sum(mismatch_mask))
+        total_elements = int(cpu_f64.size)
+        report['num_mismatch'] = num_mismatch
+        report['total_elements'] = total_elements
+        report['mismatch_ratio'] = num_mismatch / total_elements if total_elements > 0 else 0.0
+
+        # 7. 统计摘要
+        report['cpu_stats'] = {
+            'min': float(np.min(cpu_f64)),
+            'max': float(np.max(cpu_f64)),
+            'mean': float(np.mean(cpu_f64)),
+            'std': float(np.std(cpu_f64)),
+        }
+        report['musa_stats'] = {
+            'min': float(np.min(musa_f64)),
+            'max': float(np.max(musa_f64)),
+            'mean': float(np.mean(musa_f64)),
+            'std': float(np.std(musa_f64)),
+        }
+
+        # 8. 余弦相似度
+        cpu_flat = cpu_f64.flatten()
+        musa_flat = musa_f64.flatten()
+        norm_cpu = np.linalg.norm(cpu_flat)
+        norm_musa = np.linalg.norm(musa_flat)
+        if norm_cpu > 0 and norm_musa > 0:
+            report['cosine_similarity'] = float(
+                np.dot(cpu_flat, musa_flat) / (norm_cpu * norm_musa)
+            )
+        else:
+            report['cosine_similarity'] = 1.0 if np.allclose(cpu_flat, musa_flat) else 0.0
+
+        # 9. 分档统计：不同误差阈值下的通过率
+        thresholds = [1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2]
+        report['threshold_pass_rates'] = {}
+        for t in thresholds:
+            pass_count = int(np.sum(np.isclose(cpu_f64, musa_f64, rtol=t, atol=t)))
+            report['threshold_pass_rates'][str(t)] = pass_count / total_elements if total_elements > 0 else 1.0
+
+        # 10. 最终判定
+        report['passed'] = report['allclose']
+
+        return report
+
+    def print_report(self, report: Dict[str, Any]) -> None:
+        """打印精度对比报告"""
+        self.logger.info("")
+        self.logger.info("=" * 80)
+        self.logger.info("  CPU vs MUSA 精度对比报告")
+        self.logger.info("=" * 80)
+
+        # 基本信息
+        passed_str = "✅ PASSED" if report.get('passed') else "❌ FAILED"
+        self.logger.info(f"  结果: {passed_str}")
+        self.logger.info(f"  CPU  Shape: {report['cpu_shape']}, Dtype: {report['cpu_dtype']}")
+        self.logger.info(f"  MUSA Shape: {report['musa_shape']}, Dtype: {report['musa_dtype']}")
+        self.logger.info(f"  容差: rtol={report['rtol']}, atol={report['atol']}")
+
+        if not report.get('shape_match'):
+            self.logger.error(f"  错误: {report.get('error', 'Shape 不匹配')}")
+            return
+
+        self.logger.info("")
+
+        # 误差统计表格
+        if PRETTYTABLE_AVAILABLE:
+            table = PrettyTable()
+            table.field_names = ["指标", "值"]
+            table.align["指标"] = "l"
+            table.align["值"] = "r"
+
+            table.add_row(["最大绝对误差", f"{report['max_abs_diff']:.2e}"])
+            table.add_row(["平均绝对误差", f"{report['mean_abs_diff']:.2e}"])
+            table.add_row(["中位绝对误差", f"{report['median_abs_diff']:.2e}"])
+            table.add_row(["最大相对误差", f"{report['max_rel_diff']:.2e}"])
+            table.add_row(["平均相对误差", f"{report['mean_rel_diff']:.2e}"])
+            table.add_row(["中位相对误差", f"{report['median_rel_diff']:.2e}"])
+            table.add_row(["余弦相似度", f"{report['cosine_similarity']:.10f}"])
+            table.add_row(["np.allclose", str(report['allclose'])])
+            table.add_row(["不匹配元素数", f"{report['num_mismatch']} / {report['total_elements']}"])
+            table.add_row(["不匹配比例", f"{report['mismatch_ratio']:.6%}"])
+
+            for line in table.get_string().split('\n'):
+                self.logger.info(line)
+        else:
+            self.logger.info(f"  最大绝对误差:  {report['max_abs_diff']:.2e}")
+            self.logger.info(f"  平均绝对误差:  {report['mean_abs_diff']:.2e}")
+            self.logger.info(f"  最大相对误差:  {report['max_rel_diff']:.2e}")
+            self.logger.info(f"  平均相对误差:  {report['mean_rel_diff']:.2e}")
+            self.logger.info(f"  余弦相似度:    {report['cosine_similarity']:.10f}")
+            self.logger.info(f"  np.allclose:   {report['allclose']}")
+            self.logger.info(f"  不匹配元素:    {report['num_mismatch']} / {report['total_elements']}")
+            self.logger.info(f"  不匹配比例:    {report['mismatch_ratio']:.6%}")
+
+        # 分档通过率
+        self.logger.info("")
+        self.logger.info("  各容差阈值下的通过率:")
+        if PRETTYTABLE_AVAILABLE:
+            thresh_table = PrettyTable()
+            thresh_table.field_names = ["阈值", "通过率"]
+            thresh_table.align["阈值"] = "r"
+            thresh_table.align["通过率"] = "r"
+            for t_str, rate in report['threshold_pass_rates'].items():
+                thresh_table.add_row([t_str, f"{rate:.6%}"])
+            for line in thresh_table.get_string().split('\n'):
+                self.logger.info(line)
+        else:
+            for t_str, rate in report['threshold_pass_rates'].items():
+                self.logger.info(f"    阈值 {t_str}: {rate:.6%}")
+
+        # 数值统计对比
+        self.logger.info("")
+        self.logger.info("  数值分布对比:")
+        if PRETTYTABLE_AVAILABLE:
+            stats_table = PrettyTable()
+            stats_table.field_names = ["统计量", "CPU", "MUSA", "差异"]
+            stats_table.align = "r"
+            stats_table.align["统计量"] = "l"
+            for key in ['min', 'max', 'mean', 'std']:
+                cpu_val = report['cpu_stats'][key]
+                musa_val = report['musa_stats'][key]
+                diff = abs(cpu_val - musa_val)
+                stats_table.add_row([key, f"{cpu_val:.6f}", f"{musa_val:.6f}", f"{diff:.2e}"])
+            for line in stats_table.get_string().split('\n'):
+                self.logger.info(line)
+        else:
+            for key in ['min', 'max', 'mean', 'std']:
+                cpu_val = report['cpu_stats'][key]
+                musa_val = report['musa_stats'][key]
+                self.logger.info(f"    {key}: CPU={cpu_val:.6f}, MUSA={musa_val:.6f}, "
+                                f"diff={abs(cpu_val - musa_val):.2e}")
+
+        self.logger.info("=" * 80)
+
+    def save_report(self, report: Dict[str, Any]) -> str:
+        """保存精度对比报告到文件
+
+        Returns:
+            保存的文件路径
+        """
+        timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
+        filename = f"accuracy_comparison_{timestamp}.json"
+        filepath = os.path.join(self.trace_dir, filename)
+        with open(filepath, 'w') as f:
+            json.dump(report, f, indent=2)
+        self.logger.info(f"  精度对比报告已保存到: {filepath}")
+        return filepath
+
+    def run_comparison(self, graph_def: graph_pb2.GraphDef, feed_dict: Dict,
+                       output_node_name: str, rtol: float = 1e-5,
+                       atol: float = 1e-6, warmup_rounds: int = 2) -> Dict[str, Any]:
+        """执行完整的 CPU vs MUSA 精度对比
+
+        Args:
+            graph_def: 图定义
+            feed_dict: 输入数据字典
+            output_node_name: 输出节点名称
+            rtol: 相对容差
+            atol: 绝对容差
+            warmup_rounds: 预热轮数
+
+        Returns:
+            精度对比报告
+        """
+        self.logger.info("=" * 80)
+        self.logger.info("  CPU vs MUSA 精度对比验证")
+        self.logger.info("=" * 80)
+
+        # 在 CPU 上运行
+        cpu_result = self.run_on_device(graph_def, feed_dict, output_node_name,
+                                         "CPU", warmup_rounds)
+        if cpu_result is None:
+            self.logger.error("CPU 推理失败，无法进行精度对比")
+            return {'passed': False, 'error': 'CPU inference failed'}
+
+        # 在 MUSA 上运行
+        musa_result = self.run_on_device(graph_def, feed_dict, output_node_name,
+                                          "MUSA", warmup_rounds)
+        if musa_result is None:
+            self.logger.error("MUSA 推理失败，无法进行精度对比")
+            return {'passed': False, 'error': 'MUSA inference failed'}
+
+        # 比较结果
+        report = self.compare_results(cpu_result, musa_result, rtol=rtol, atol=atol)
+
+        # 打印并保存报告
+        self.print_report(report)
+        self.save_report(report)
+
+        return report
+
+
+# ...existing code... (GraphProfiler class stays unchanged)
+
 class GraphProfiler:
     """Graph 推理性能分析器"""
 
@@ -71,47 +394,8 @@ class GraphProfiler:
         self.logger = self.log_mgr.get_logger("profiler", "inference.log")
         self.trace_dir = self.log_mgr.trace_dir
 
-    # def setup_logging(self):
-    #     """设置日志记录"""
-    #     log_dir = "logs/graph_inference"
-    #     os.makedirs(log_dir, exist_ok=True)
-    #     timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
-
-    #     # 先创建 trace_dir，日志文件都放在 trace 文件夹下
-    #     self.trace_dir = f"{log_dir}/{timestamp}_trace"
-    #     os.makedirs(self.trace_dir, exist_ok=True)
-
-    #     formatter = logging.Formatter(
-    #         fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    #         datefmt="%Y-%m-%d %H:%M:%S",
-    #     )
-
-    #     # 日志文件放在 trace 文件夹下
-    #     file_handler = logging.FileHandler(
-    #         f"{self.trace_dir}/inference.log", mode="a", encoding="utf-8"
-    #     )
-    #     file_handler.setLevel(logging.INFO)
-    #     file_handler.setFormatter(formatter)
-
-    #     stdout_handler = logging.StreamHandler(sys.stdout)
-    #     stdout_handler.setLevel(logging.INFO)
-    #     stdout_handler.setFormatter(formatter)
-
-    #     self.logger = logging.getLogger("graph_inference.profiler")
-    #     self.logger.setLevel(logging.INFO)
-    #     self.logger.addHandler(file_handler)
-    #     self.logger.addHandler(stdout_handler)
-
     def run_inference_only(self, warmup_rounds: int = 5, inference_rounds: int = 20) -> Dict[str, Any]:
-        """仅运行 warmup 和 inference，不进行其他分析
-
-        Args:
-            warmup_rounds: 预热轮数
-            inference_rounds: 推理轮数
-
-        Returns:
-            性能统计结果字典
-        """
+        """仅运行 warmup 和 inference，不进行其他分析"""
         self.logger.info("=" * 60)
         self.logger.info(f"INFERENCE-ONLY MODE (Device: {self.device_type})")
         self.logger.info("=" * 60)
@@ -126,29 +410,24 @@ class GraphProfiler:
             config.gpu_options.allow_growth = True
 
         with tf.compat.v1.Session(graph=self.graph, config=config) as sess:
-            # 预热阶段
             self.logger.info("\nStarting warmup rounds...")
             for i in range(warmup_rounds):
                 sess.run(self.output_tensor, feed_dict=self.feed_dict)
                 if (i + 1) % 5 == 0:
                     self.logger.info(f"  Warmup round {i + 1}/{warmup_rounds} completed")
 
-            # 推理阶段
             self.logger.info("\nStarting inference rounds...")
             times = []
-
             for i in range(inference_rounds):
                 start_time = time.time()
                 sess.run(self.output_tensor, feed_dict=self.feed_dict)
                 end_time = time.time()
                 iteration_time = end_time - start_time
                 times.append(iteration_time)
-
                 if (i + 1) % 5 == 0:
                     self.logger.info(f"  Inference round {i + 1}/{inference_rounds} completed, "
                                     f"time: {iteration_time:.4f}s")
 
-        # 计算统计信息
         avg_time = sum(times) / len(times)
         min_time = min(times)
         max_time = max(times)
@@ -168,7 +447,6 @@ class GraphProfiler:
         self.logger.info(f"Standard deviation:     {np.std(times):.6f} seconds")
         self.logger.info("=" * 60)
 
-        # 保存结果
         perf_result = {
             'device_type': self.device_type,
             'warmup_rounds': warmup_rounds,
@@ -193,15 +471,7 @@ class GraphProfiler:
         return perf_result
 
     def profile_whole_network(self, warmup_rounds: int = 5, profiling_rounds: int = 20) -> Dict[str, Any]:
-        """整网性能分析
-
-        Args:
-            warmup_rounds: 预热轮数
-            profiling_rounds: 分析轮数
-
-        Returns:
-            性能分析结果字典
-        """
+        """整网性能分析"""
         self.logger.info("=" * 60)
         self.logger.info(f"整网性能分析 (Device: {self.device_type})")
         self.logger.info("=" * 60)
@@ -215,28 +485,23 @@ class GraphProfiler:
             config.gpu_options.allow_growth = True
 
         with tf.compat.v1.Session(graph=self.graph, config=config) as sess:
-            # 预热阶段
             self.logger.info(f"\n预热阶段：{warmup_rounds} 轮...")
             for i in range(warmup_rounds):
                 sess.run(self.output_tensor, feed_dict=self.feed_dict)
                 if (i + 1) % 5 == 0:
                     self.logger.info(f"  预热轮次 {i + 1}/{warmup_rounds} 完成")
 
-            # 性能分析阶段
             self.logger.info(f"\n性能分析阶段：{profiling_rounds} 轮...")
             times = []
-
             for i in range(profiling_rounds):
                 start_time = time.time()
                 sess.run(self.output_tensor, feed_dict=self.feed_dict)
                 end_time = time.time()
                 iteration_time = end_time - start_time
                 times.append(iteration_time)
-
                 if (i + 1) % 5 == 0:
                     self.logger.info(f"  分析轮次 {i + 1}/{profiling_rounds} 完成，耗时：{iteration_time:.4f}s")
 
-        # 计算统计信息
         avg_time = sum(times) / len(times)
         min_time = min(times)
         max_time = max(times)
@@ -256,7 +521,6 @@ class GraphProfiler:
         self.logger.info(f"标准差：          {np.std(times):.6f} 秒")
         self.logger.info("=" * 60)
 
-        # 保存结果
         perf_result = {
             'device_type': self.device_type,
             'warmup_rounds': warmup_rounds,
@@ -278,15 +542,10 @@ class GraphProfiler:
             json.dump(perf_result, f, indent=2)
 
         self.logger.info(f"\n性能结果已保存到：{perf_file}")
-
         return perf_result
 
     def profile_operator_times(self, warmup_rounds: int = 3) -> None:
-        """单算子性能分析（使用 TensorFlow Profiler）
-
-        Args:
-            warmup_rounds: 预热轮数
-        """
+        """单算子性能分析"""
         self.logger.info("=" * 60)
         self.logger.info("单算子性能分析 (Operator Performance)")
         self.logger.info("=" * 60)
@@ -304,19 +563,15 @@ class GraphProfiler:
         os.makedirs(log_dir, exist_ok=True)
 
         with tf.compat.v1.Session(graph=self.graph, config=config) as sess:
-            # 预热
             self.logger.info(f"\n预热：{warmup_rounds} 轮...")
             for _ in range(warmup_rounds):
                 sess.run(self.output_tensor, feed_dict=self.feed_dict)
 
-            # 启动 Profiler - 使用 TF1 兼容的 API
             self.logger.info("启动 TensorFlow Profiler...")
             try:
-                # 使用 TF1 的 tf.profiler API
                 run_meta = tf.RunMetadata()
                 run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
 
-                # 执行推理并收集 trace 信息
                 self.logger.info("执行推理并收集性能数据...")
                 result = sess.run(
                     self.output_tensor,
@@ -325,33 +580,24 @@ class GraphProfiler:
                     run_metadata=run_meta
                 )
 
-                # 导出 trace 数据
                 from tensorflow.python.client import timeline
                 timeline_obj = timeline.Timeline(run_meta.step_stats)
                 trace_data = timeline_obj.generate_chrome_trace_format()
 
-                # 保存 trace 数据
                 trace_file = os.path.join(log_dir, f"trace_{self.device_type}_{timestamp}.json")
                 with open(trace_file, 'w') as f:
                     f.write(trace_data)
 
                 self.logger.info(f"Profiler 完成，trace 数据已保存到：{trace_file}")
-
-                # 解析并打印算子统计信息
                 self._print_op_stats_from_run_metadata(run_meta)
 
             except Exception as e:
                 self.logger.warning(f"Profiler 不可用或出错：{e}")
                 self.logger.info("尝试使用备用方法收集算子信息...")
-                # 备用方法：直接执行并计时
                 self._profile_with_simple_timing(sess, warmup_rounds)
 
     def _print_op_stats_from_run_metadata(self, run_meta: tf.RunMetadata) -> None:
-        """从 RunMetadata 打印算子统计信息
-
-        Args:
-            run_meta: TensorFlow RunMetadata 对象
-        """
+        """从 RunMetadata 打印算子统计信息"""
         if not run_meta or not run_meta.step_stats:
             self.logger.info("无算子性能数据")
             return
@@ -360,13 +606,11 @@ class GraphProfiler:
         self.logger.info(f"算子执行时间统计 (Device: {self.device_type})")
         self.logger.info("=" * 80)
 
-        # 收集算子统计信息
         op_stats = []
         for dev_stat in run_meta.step_stats.dev_stats:
             device_name = dev_stat.device
             for node_stat in dev_stat.node_stats:
                 op_name = node_stat.node_name
-                # 获取执行时间（微秒转换为毫秒）
                 if node_stat.all_end_rel_micros:
                     duration_ms = node_stat.all_end_rel_micros / 1000.0
                     op_stats.append({
@@ -375,12 +619,9 @@ class GraphProfiler:
                         'duration_ms': duration_ms
                     })
 
-        # 按执行时间排序
         op_stats.sort(key=lambda x: x['duration_ms'], reverse=True)
 
-        # 使用 prettytable 打印表格
         if PRETTYTABLE_AVAILABLE and op_stats:
-            # 使用 logger 输出表格，避免与其他日志输出穿插
             self.logger.info("\n" + "=" * 100)
             self.logger.info(f"算子执行时间统计 (Device: {self.device_type}, Top 30 by Duration)")
             self.logger.info("=" * 100)
@@ -399,14 +640,12 @@ class GraphProfiler:
                     f"{stat['duration_ms']:.3f}"
                 ])
 
-            # 将表格作为整体通过 logger 输出，避免穿插
             for line in table.get_string().split('\n'):
                 self.logger.info(line)
 
             if len(op_stats) > 30:
                 self.logger.info(f"... 还有 {len(op_stats) - 30} 个算子")
         else:
-            # 降级到普通打印
             self.logger.info(f"{'Operator Name':<50} {'Device':<20} {'Duration(ms)':<12}")
             self.logger.info("-" * 80)
             for stat in op_stats[:30]:
@@ -415,7 +654,6 @@ class GraphProfiler:
 
         self.logger.info("=" * 80)
 
-        # 保存结果（标记为 RunMetadata 来源，避免与 print_operator_timings 的保存消息重复）
         if op_stats and not self.operator_timings:
             timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
             op_stats_file = os.path.join(self.trace_dir, f"op_stats_{self.device_type}_{timestamp}.json")
@@ -428,11 +666,7 @@ class GraphProfiler:
             self.logger.info(f"\n算子统计结果已保存到：{op_stats_file}")
 
     def parse_operator_timings(self, log_dir: str) -> None:
-        """解析算子时间信息
-
-        Args:
-            log_dir: Profiler 输出目录
-        """
+        """解析算子时间信息"""
         self.logger.info("\n解析算子性能数据...")
 
         trace_files = []
@@ -499,9 +733,7 @@ class GraphProfiler:
 
         all_op_stats.sort(key=lambda x: x['total_time_ms'], reverse=True)
 
-        # 使用 prettytable 打印表格
         if PRETTYTABLE_AVAILABLE:
-            # 使用 logger 输出表格，避免与其他日志输出穿插
             self.logger.info("\n" + "=" * 100)
             self.logger.info(f"算子执行时间统计 (Device: {self.device_type}, Top 30 by Total Time)")
             self.logger.info("=" * 100)
@@ -522,14 +754,12 @@ class GraphProfiler:
                     f"{stat['avg_time_ms']:.3f}"
                 ])
 
-            # 将表格作为整体通过 logger 输出，避免穿插
             for line in table.get_string().split('\n'):
                 self.logger.info(line)
 
             if len(all_op_stats) > 30:
                 self.logger.info(f"... 还有 {len(all_op_stats) - 30} 个算子")
         else:
-            # 降级到普通打印
             self.logger.info("\n" + "=" * 80)
             self.logger.info(f"算子执行时间统计 (Device: {self.device_type}, Top 30 by Total Time)")
             self.logger.info("=" * 80)
@@ -538,7 +768,6 @@ class GraphProfiler:
             for stat in all_op_stats[:30]:
                 self.logger.info(f"{stat['name']:<50} {stat['total_time_ms']:<12.3f} {stat['count']:<8} {stat['avg_time_ms']:<12.3f}")
 
-        # 保存结果
         timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
         op_timing_file = os.path.join(self.trace_dir, f"operator_timings_{self.device_type}_{timestamp}.json")
         with open(op_timing_file, 'w') as f:
@@ -563,12 +792,7 @@ class GraphProfiler:
         self.logger.info("=" * 80)
 
     def print_performance_table(self, perf_result: Dict[str, Any]) -> None:
-        """使用 prettytable 打印性能结果表格
-
-        Args:
-            perf_result: 性能分析结果字典
-        """
-        # Log to logger as well to ensure output is captured
+        """使用 prettytable 打印性能结果表格"""
         self.logger.info("=" * 60)
         self.logger.info("PERFORMANCE SUMMARY")
         self.logger.info("=" * 60)
@@ -583,9 +807,7 @@ class GraphProfiler:
         self.logger.info(f"Std Deviation (s): {perf_result['std_deviation']:.6f}")
         self.logger.info("=" * 60)
 
-        # Also print to stdout for terminal display
         if PRETTYTABLE_AVAILABLE:
-
             print("\n" + "=" * 60)
             print("PERFORMANCE SUMMARY")
             print("=" * 60)
@@ -607,18 +829,11 @@ class GraphProfiler:
 
             print(table)
             print("=" * 60)
-            sys.stdout.flush() # Ensure output is flushed to terminal
+            sys.stdout.flush()
+
 
 def infer_placeholder_shape_from_usage(graph_def: graph_pb2.GraphDef, placeholder_name: str) -> Optional[List[int]]:
-    """通过分析图中使用该 Placeholder 的节点来推断其形状
-
-    Args:
-        graph_def: 图定义
-        placeholder_name: Placeholder 名称
-
-    Returns:
-        推断的形状列表，如果无法推断则返回 None
-    """
+    """通过分析图中使用该 Placeholder 的节点来推断其形状"""
     for node in graph_def.node:
         for input_name in node.input:
             clean_input = input_name.split(":")[0].lstrip("^")
@@ -641,15 +856,7 @@ def infer_placeholder_shape_from_usage(graph_def: graph_pb2.GraphDef, placeholde
 
 
 def load_graph_and_get_placeholders(pb_path: str, logger: logging.Logger) -> tuple:
-    """加载图并获取所有 placeholder 节点信息
-
-    Args:
-        pb_path: 图文件路径
-        logger: 日志记录器
-
-    Returns:
-        (graph_def, placeholders) 元组
-    """
+    """加载图并获取所有 placeholder 节点信息"""
     logger.info(f"\n=== 加载图文件：{pb_path} ===")
 
     if not os.path.exists(pb_path):
@@ -705,15 +912,7 @@ def load_graph_and_get_placeholders(pb_path: str, logger: logging.Logger) -> tup
 
 
 def create_mock_data(placeholders: Dict[str, Dict], batch_size: int) -> Dict[str, np.ndarray]:
-    """根据 placeholder 信息创建 mock 数据
-
-    Args:
-        placeholders: Placeholder 信息字典
-        batch_size: 批次大小
-
-    Returns:
-        输入数据字典
-    """
+    """根据 placeholder 信息创建 mock 数据"""
     logger = logging.getLogger("graph_inference.main")
     logger.info("\n=== 创建 Mock 数据 ===")
 
@@ -763,22 +962,7 @@ def run_inference(graph_def: graph_pb2.GraphDef, feed_dict: Dict, output_node_na
                   device_type: str, batch_size: int, enable_profiling: bool = True,
                   warmup_rounds: int = 5, inference_rounds: int = 20,
                   log_device_placement: bool = False) -> Optional[np.ndarray]:
-    """执行图推理
-
-    Args:
-        graph_def: 图定义
-        feed_dict: 输入数据字典
-        output_node_name: 输出节点名称
-        device_type: 设备类型
-        batch_size: 批次大小
-        enable_profiling: 是否启用性能分析
-        warmup_rounds: 预热轮数
-        inference_rounds: 推理轮数
-        log_device_placement: 是否记录设备放置信息
-
-    Returns:
-        推理结果，如果失败则返回 None
-    """
+    """执行图推理"""
     logger = logging.getLogger("graph_inference.main")
     logger.info(f"\n=== 执行图推理 (Device: {device_type}) ===")
     logger.info(f"输出节点：{output_node_name}")
@@ -857,12 +1041,9 @@ def run_inference(graph_def: graph_pb2.GraphDef, feed_dict: Dict, output_node_na
 
 def main():
     """主函数"""
-    # 设置根日志
     log_mgr = get_log_manager("graph_inference")
     logger = log_mgr.get_logger("main")
 
-
-    # 解析命令行参数
     parser = argparse.ArgumentParser(
         description='Graph Def TensorFlow 推理脚本 - 支持 CPU/MUSA/CUDA 设备性能对比',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -883,6 +1064,12 @@ def main():
   # 仅分析算子性能
   python run_graph_tf_musa.py --device musa --profile-ops
 
+  # CPU vs MUSA 精度对比
+  python run_graph_tf_musa.py --compare-accuracy
+
+  # 精度对比 + 自定义容差
+  python run_graph_tf_musa.py --compare-accuracy --rtol 1e-4 --atol 1e-5
+
   # 自定义配置
   python run_graph_tf_musa.py --device musa --batch-size 256 --warmup-rounds 10 --inference-rounds 50
         """
@@ -892,6 +1079,12 @@ def main():
                         help='仅运行 warmup 和 inference 轮次，不进行其他分析')
     parser.add_argument('--profile-ops', action='store_true',
                         help='分析单个算子的执行时间')
+    parser.add_argument('--compare-accuracy', action='store_true',
+                        help='运行 CPU vs MUSA 精度对比验证')
+    parser.add_argument('--rtol', type=float, default=1e-5,
+                        help='精度对比的相对容差，默认：1e-5')
+    parser.add_argument('--atol', type=float, default=1e-6,
+                        help='精度对比的绝对容差，默认：1e-6')
     parser.add_argument('--model', type=str, default=DEFAULT_MODEL_PATH,
                         help=f'模型文件路径 (pb 格式)，默认：{DEFAULT_MODEL_PATH}')
     parser.add_argument('--output-node', type=str, default=DEFAULT_OUTPUT_NODE_NAME,
@@ -911,18 +1104,22 @@ def main():
 
     args = parser.parse_args()
 
-    # 加载 MUSA 插件（仅在 device=musa 时需要）
-    if args.device == 'musa':
+    # 精度对比模式需要 MUSA 插件
+    if args.compare_accuracy or args.device == 'musa':
         if os.path.exists(args.musa_plugin):
             try:
                 tf.load_op_library(args.musa_plugin)
                 logger.info(f">>>> [MUSA] Plugin loaded successfully from: {args.musa_plugin}")
             except Exception as e:
                 logger.error(f"!!!! [MUSA] Failed to load plugin: {e}")
+                if args.compare_accuracy:
+                    logger.error("精度对比模式需要 MUSA 插件，退出")
+                    return
         else:
             logger.error(f"!!!! [MUSA] Plugin not found at {args.musa_plugin}")
-    elif args.device == 'cuda':
-        logger.info("Running on CUDA GPU, MUSA plugin not loaded")
+            if args.compare_accuracy:
+                logger.error("精度对比模式需要 MUSA 插件，退出")
+                return
     else:
         logger.info("Running on CPU, MUSA plugin not loaded")
 
@@ -932,8 +1129,46 @@ def main():
         logger.error("错误：未找到 Placeholder")
         return
 
-    # 2. 造数据
+    # 2. 造数据（使用固定 seed 确保 CPU 和 MUSA 使用相同输入）
+    np.random.seed(42)
     feed_dict = create_mock_data(placeholders, args.batch_size)
+
+    # ==========================================
+    # 精度对比模式
+    # ==========================================
+    if args.compare_accuracy:
+        logger.info("\n" + "=" * 80)
+        logger.info("  运行模式: CPU vs MUSA 精度对比验证")
+        logger.info("=" * 80)
+
+        comparator = AccuracyComparator(logger, log_mgr.trace_dir)
+        report = comparator.run_comparison(
+            graph_def=graph_def,
+            feed_dict=feed_dict,
+            output_node_name=args.output_node,
+            rtol=args.rtol,
+            atol=args.atol,
+            warmup_rounds=args.warmup_rounds
+        )
+
+        if report.get('passed'):
+            logger.info("\n🎉 精度对比通过！CPU 与 MUSA 结果一致。")
+        else:
+            logger.warning("\n⚠️  精度对比未通过，请检查报告中的详细信息。")
+
+        logger.info(f"结果保存在: {log_mgr.trace_dir}")
+
+        # 如果同时指定了其他模式，继续执行
+        if not (args.inference_only or args.profile_ops or
+                (not args.inference_only and not args.profile_ops)):
+            return
+        # 仅精度对比模式时直接返回
+        if not args.inference_only and not args.profile_ops:
+            return
+
+    # ==========================================
+    # 性能分析模式
+    # ==========================================
 
     # 3. 创建图并准备推理
     with tf.Graph().as_default() as graph:
@@ -953,14 +1188,11 @@ def main():
             logger.error(f"错误：找不到输出张量 {args.output_node}:0")
             return
 
-        # 创建性能分析器
-        profiler = GraphProfiler(graph, session_feed_dict, output_tensor, args.batch_size, args.device.upper())
+        profiler = GraphProfiler(graph, session_feed_dict, output_tensor,
+                                  args.batch_size, args.device.upper())
 
-        # 根据参数执行不同的测试模式
         if args.inference_only:
-            # 仅运行 warmup 和 inference
             if args.profile_ops:
-                # 运行算子分析（仅使用 profile_operator_times，避免重复统计）
                 logger.info("\nRunning inference with operator profiling...")
                 run_inference(
                     graph_def=graph_def,
@@ -970,10 +1202,9 @@ def main():
                     batch_size=args.batch_size,
                     enable_profiling=False,
                     warmup_rounds=args.warmup_rounds,
-                    inference_rounds=args.warmup_rounds,  # 预热
+                    inference_rounds=args.warmup_rounds,
                     log_device_placement=args.log_device_placement
                 )
-                # profile_operator_times 内部会调用 _print_op_stats_from_run_metadata 打印和保存结果
                 profiler.profile_operator_times(warmup_rounds=3)
             else:
                 result = profiler.run_inference_only(
@@ -986,7 +1217,6 @@ def main():
             logger.info(f"Results saved in: {profiler.trace_dir}")
 
         elif args.profile_ops:
-            # 仅分析算子性能（profile_operator_times 内部已包含打印和保存逻辑）
             logger.info("\nRunning operator profiling...")
             profiler.profile_operator_times(warmup_rounds=args.warmup_rounds)
 
@@ -994,10 +1224,8 @@ def main():
             logger.info(f"Results saved in: {profiler.trace_dir}")
 
         else:
-            # 运行完整分析
             logger.info("\nRunning comprehensive analysis...")
 
-            # 先运行推理
             run_inference(
                 graph_def=graph_def,
                 feed_dict=feed_dict,
@@ -1010,14 +1238,12 @@ def main():
                 log_device_placement=args.log_device_placement
             )
 
-            # 整网性能分析
             perf_result = profiler.profile_whole_network(
                 warmup_rounds=args.warmup_rounds,
                 profiling_rounds=args.inference_rounds
             )
             profiler.print_performance_table(perf_result)
 
-            # 算子性能分析（profile_operator_times 内部已包含打印和保存逻辑）
             profiler.profile_operator_times()
 
             logger.info(f"\nComprehensive analysis completed!")
