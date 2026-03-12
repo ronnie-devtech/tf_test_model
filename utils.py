@@ -13,10 +13,11 @@
 
 import os
 import sys
+import glob
 import json
 import logging
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # ==========================================
@@ -33,6 +34,104 @@ DEFAULT_LOG_ROOT = "logs"
 DEFAULT_LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 DEFAULT_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 DEFAULT_LOG_LEVEL = logging.INFO
+
+
+def get_musa_plugin_path_candidates() -> List[str]:
+    """Return candidate libmusa_plugin.so paths.
+
+    Keep the workspace-relative path as the preferred default because it works
+    for both a local clone and a typical sibling checkout layout. The docker
+    absolute path is still retained as an explicit fallback for container runs.
+    """
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    workspace_root = os.path.dirname(repo_root)
+
+    candidate_paths = []
+
+    env_path = os.environ.get("MUSA_PLUGIN_PATH")
+    if env_path:
+        candidate_paths.append(env_path)
+
+    candidate_paths.extend(
+        [
+            os.path.join(
+                workspace_root,
+                "tensorflow_musa_extension",
+                "build",
+                "libmusa_plugin.so",
+            ),
+            os.path.join(
+                workspace_root,
+                "tensorflow_musa_extension",
+                "build_local",
+                "libmusa_plugin.so",
+            ),
+            # Docker absolute fallback.
+            "/workspace/tensorflow_musa_extension/build/libmusa_plugin.so",
+        ]
+    )
+
+    return candidate_paths
+
+
+def get_default_musa_plugin_path() -> str:
+    """Return the best default path for libmusa_plugin.so."""
+    candidate_paths = get_musa_plugin_path_candidates()
+
+    for candidate in candidate_paths:
+        normalized = os.path.abspath(os.path.expanduser(candidate))
+        if os.path.exists(normalized):
+            return normalized
+
+    return os.path.abspath(os.path.expanduser(candidate_paths[0]))
+
+
+def resolve_musa_plugin_path(plugin_path: Optional[str]) -> str:
+    """Normalize a user-provided plugin path, or auto-detect one."""
+    if plugin_path:
+        return os.path.abspath(os.path.expanduser(plugin_path))
+    return get_default_musa_plugin_path()
+
+
+def load_latest_after_fusion_graph_def(
+    logger: Optional[logging.Logger] = None,
+    warn_if_missing: bool = True,
+) -> Tuple[Optional[Any], Optional[str]]:
+    """Load the newest dumped `*_after_fusion.pbtxt` GraphDef if available."""
+    dump_enabled = os.environ.get("MUSA_DUMP_GRAPHDEF", "")
+    if dump_enabled not in ("1", "true", "TRUE", "yes"):
+        return None, None
+
+    dump_dir = os.environ.get("MUSA_DUMP_GRAPHDEF_DIR", ".")
+    dump_files = sorted(glob.glob(os.path.join(dump_dir, "*_after_fusion.pbtxt")))
+    if not dump_files:
+        if logger is not None and warn_if_missing:
+            logger.warning("No after_fusion dump found in %s", dump_dir)
+        return None, None
+
+    from google.protobuf import text_format
+    from tensorflow.core.framework import graph_pb2
+
+    latest_dump = dump_files[-1]
+    graph_def = graph_pb2.GraphDef()
+    with open(latest_dump, "r", encoding="utf-8") as handle:
+        text_format.Parse(handle.read(), graph_def)
+
+    return graph_def, latest_dump
+
+
+def build_optimized_op_type_map(
+    logger: Optional[logging.Logger] = None,
+    warn_if_missing: bool = True,
+) -> Tuple[Dict[str, str], Optional[str]]:
+    """Build a node_name -> op_type map from the latest optimized graph dump."""
+    graph_def, latest_dump = load_latest_after_fusion_graph_def(
+        logger=logger, warn_if_missing=warn_if_missing
+    )
+    if graph_def is None:
+        return {}, None
+
+    return {node.name: node.op for node in graph_def.node}, latest_dump
 
 
 class LogManager:

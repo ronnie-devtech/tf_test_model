@@ -1,24 +1,37 @@
 import argparse
+import os
+import random
+import sys
+
+# 添加项目根目录到 Python 路径
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
+from tf_test_model.utils import get_default_musa_plugin_path, resolve_musa_plugin_path
 
 parser = argparse.ArgumentParser(description="Test TensorFlow MUSA Library")
 parser.add_argument(
     "tensorflow_musa_library_path",
-    type=str,
-    help="Path to the TensorFlow MUSA library .so file",
+    nargs="?",
+    default=get_default_musa_plugin_path(),
+    help="Path to the TensorFlow MUSA library .so file "
+         "(defaults to the auto-detected sibling build path)",
 )
 args = parser.parse_args()
+plugin_path = resolve_musa_plugin_path(args.tensorflow_musa_library_path)
+
 import tensorflow as tf
 
-tf.load_library(args.tensorflow_musa_library_path)
+tf.load_library(plugin_path)
 
 import numpy as np
-import random
-import os, sys
 
-# 添加项目根目录到 Python 路径
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from model.tensorflow.wukong import Wukong
 from model.tensorflow.lr_schedule import LinearWarmup
+
+# Example sibling-workspace path (preferred):
+#   ../tensorflow_musa_extension/build/libmusa_plugin.so
+# Example docker absolute path (fallback):
+#   /workspace/tensorflow_musa_extension/build/libmusa_plugin.so
 
 
 ####################################################################################################
