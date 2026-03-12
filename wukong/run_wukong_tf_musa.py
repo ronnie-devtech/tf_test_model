@@ -18,7 +18,12 @@ import collections
 
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-from tf_test_model.utils import get_log_manager
+from tf_test_model.utils import (
+    build_optimized_op_type_map,
+    get_default_musa_plugin_path,
+    get_log_manager,
+    resolve_musa_plugin_path,
+)
 
 try:
     import tensorflow as tf
@@ -42,6 +47,23 @@ if TF_AVAILABLE:
 
 class InferenceProfiler:
     """Wukong模型推理分析器"""
+
+    # Eager profiler emits both real kernel events and a large amount of Python /
+    # dispatcher overhead. Filter wrapper events so the final table is closer to
+    # "actual operator time" instead of "eager runtime overhead time".
+    _FILTERED_PROFILE_PREFIXES = (
+        "TFE_Py_",
+        "EagerKernelExecute",
+        "convert_to_tensor",
+        "ValidateInputTypeAndPlacement",
+        "tf.constant",
+        "EagerExecute: ",
+        "EagerLocalExecute: ",
+    )
+
+    _FILTERED_PROFILE_NAMES = {
+        "_SOURCE",
+    }
 
     def __init__(self, batch_size: int = 1024, device_type: str = "MUSA"):
         if not TF_AVAILABLE:
@@ -255,6 +277,20 @@ class InferenceProfiler:
                 with open(trace_file, 'r') as f:
                     trace_data = json.load(f)
 
+            optimized_op_type_map, optimized_dump = build_optimized_op_type_map(
+                logger=self.logger,
+                warn_if_missing=False,
+            )
+            if optimized_op_type_map:
+                self.logger.info(
+                    "Operator type mapping overlaid from optimized graph: %s",
+                    optimized_dump,
+                )
+            else:
+                self.logger.info(
+                    "No optimized after_fusion dump found; falling back to runtime event names."
+                )
+
             # 提取事件信息
             events = trace_data.get('traceEvents', [])
 
@@ -265,6 +301,11 @@ class InferenceProfiler:
             for event in events:
                 if event.get('ph') == 'X':  # Complete events
                     op_name = event.get('name', 'unknown')
+                    if (
+                        op_name in self._FILTERED_PROFILE_NAMES
+                        or any(op_name.startswith(prefix) for prefix in self._FILTERED_PROFILE_PREFIXES)
+                    ):
+                        continue
                     duration = event.get('dur', 0)  # Duration in microseconds
 
                     # Convert to milliseconds for readability
@@ -273,7 +314,11 @@ class InferenceProfiler:
 
             # Store the timing data
             for op_name, total_time in op_times.items():
+                inferred_op_type = optimized_op_type_map.get(op_name)
+                if not inferred_op_type:
+                    inferred_op_type = "Send" if op_name.startswith("_Send input ") else op_name
                 self.operator_timings[op_name].append({
+                    'op_type': inferred_op_type,
                     'total_time_ms': total_time,
                     'count': op_counts[op_name],
                     'avg_time_ms': total_time / op_counts[op_name]
@@ -302,9 +347,11 @@ class InferenceProfiler:
             total_time = sum([item['total_time_ms'] for item in timing_data])
             total_count = sum([item['count'] for item in timing_data])
             avg_time = total_time / total_count if total_count > 0 else 0
+            op_type = timing_data[0].get('op_type', 'unknown') if timing_data else 'unknown'
 
             all_op_stats.append({
                 'name': op_name,
+                'op_type': op_type,
                 'total_time_ms': total_time,
                 'count': total_count,
                 'avg_time_ms': avg_time
@@ -314,11 +361,16 @@ class InferenceProfiler:
         all_op_stats.sort(key=lambda x: x['total_time_ms'], reverse=True)
 
         # Print top operators by total time
-        self.logger.info(f"{'Operator Name':<40} {'Total Time (ms)':<15} {'Count':<10} {'Avg Time (ms)':<15}")
-        self.logger.info("-" * 80)
+        self.logger.info(
+            f"{'Operator Name':<40} {'Op Type':<20} {'Total Time (ms)':<15} {'Count':<10} {'Avg Time (ms)':<15}"
+        )
+        self.logger.info("-" * 110)
 
         for stat in all_op_stats[:20]:  # Show top 20 operators
-            self.logger.info(f"{stat['name']:<40} {stat['total_time_ms']:<15.3f} {stat['count']:<10} {stat['avg_time_ms']:<15.3f}")
+            self.logger.info(
+                f"{stat['name']:<40} {stat['op_type']:<20} "
+                f"{stat['total_time_ms']:<15.3f} {stat['count']:<10} {stat['avg_time_ms']:<15.3f}"
+            )
 
         if len(all_op_stats) > 20:
             self.logger.info(f"... and {len(all_op_stats) - 20} more operators")
@@ -330,6 +382,7 @@ class InferenceProfiler:
                 'operators': [
                     {
                         'name': stat['name'],
+                        'op_type': stat['op_type'],
                         'total_time_ms': stat['total_time_ms'],
                         'count': stat['count'],
                         'avg_time_ms': stat['avg_time_ms']
@@ -947,6 +1000,14 @@ def main():
 
   # 自定义配置
   python run_wukong_tf_musa.py --device musa --batch-size 512 --warmup-rounds 10 --inference-rounds 50
+
+  # 手动指定相邻工作区中的插件路径（推荐）
+  python run_wukong_tf_musa.py --device musa \
+    --musa-plugin ../tensorflow_musa_extension/build/libmusa_plugin.so
+
+  # 手动指定 Docker 中的绝对路径
+  python run_wukong_tf_musa.py --device musa \
+    --musa-plugin /workspace/tensorflow_musa_extension/build/libmusa_plugin.so
         """
     )
     parser.add_argument('--inference-only', action='store_true',
@@ -967,20 +1028,30 @@ def main():
                         help='Number of inference rounds (default: 20)')
     parser.add_argument('--device', type=str, choices=['cpu', 'musa'], default='musa',
                         help='Device to run inference: cpu or musa (default: musa)')
-    parser.add_argument('--musa-plugin', type=str, default='/workspace/tensorflow_musa_extension/build/libmusa_plugin.so',
-                        help='Path to MUSA plugin library')
+    parser.add_argument('--musa-plugin', type=str, default=get_default_musa_plugin_path(),
+                        help='Path to MUSA plugin library. You can pass either a relative '
+                             'sibling-workspace path or an absolute docker path; when omitted, '
+                             'the script auto-detects one.')
     parser.add_argument('--log-device-placement', action='store_true',
                         help='Log device placement for each operation (default: False)')
 
     args = parser.parse_args()
+    args.musa_plugin = resolve_musa_plugin_path(args.musa_plugin)
+    logger.info(f"Resolved MUSA plugin path: {args.musa_plugin}")
 
     # 加载 MUSA 插件（仅在 device=musa 时需要）
     if args.device == 'musa' or args.compare_accuracy:
-        try:
-            tf.load_library(args.musa_plugin)
-            logger.info(f">>>> [MUSA] Plugin loaded successfully from: {args.musa_plugin}")
-        except Exception as e:
-            logger.error(f"!!!! [MUSA] Failed to load plugin: {e}")
+        if os.path.exists(args.musa_plugin):
+            try:
+                tf.load_library(args.musa_plugin)
+                logger.info(f">>>> [MUSA] Plugin loaded successfully from: {args.musa_plugin}")
+            except Exception as e:
+                logger.error(f"!!!! [MUSA] Failed to load plugin: {e}")
+                if args.compare_accuracy:
+                    logger.error("精度对比模式需要 MUSA 插件，退出")
+                    return
+        else:
+            logger.error(f"!!!! [MUSA] Plugin not found at {args.musa_plugin}")
             if args.compare_accuracy:
                 logger.error("精度对比模式需要 MUSA 插件，退出")
                 return

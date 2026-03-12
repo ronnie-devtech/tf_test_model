@@ -5,8 +5,19 @@ Graph Def 推理脚本
 支持从 pb 文件加载图模型并在 CPU 或 MUSA 设备上运行推理
 支持 CPU/MUSA 设备性能对比
 支持 CPU/MUSA 精度对比验证
+
+# 导出优化后的 GraphDef（pbtxt）
+# export MUSA_DUMP_GRAPHDEF=1
+# export MUSA_DUMP_GRAPHDEF_DIR=/workspace/tensorflow_musa_extension/gelu_big_graphs
+# python prunedGraph/run_graph_tf_musa.py --compare-accuracy
+#
+# 将 dump 出来的 pbtxt 转成 pb
+# python /workspace/tensorflow_musa_extension/test/ops/convert_graphdef_pbtxt_to_pb.py \
+#   /workspace/tensorflow_musa_extension/gelu_big_graphs \
+#   --output-dir /workspace/tensorflow_musa_extension/gelu_big_graphs_pb
 """
 
+import glob
 import os
 import sys
 import json
@@ -21,7 +32,13 @@ import collections
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from tf_test_model.utils import get_log_manager
+from tf_test_model.utils import (
+    build_optimized_op_type_map,
+    get_default_musa_plugin_path,
+    get_log_manager,
+    load_latest_after_fusion_graph_def,
+    resolve_musa_plugin_path,
+)
 from tensorflow.core.framework import graph_pb2
 import numpy as np
 
@@ -43,9 +60,82 @@ tf.disable_eager_execution()
 DEFAULT_MODEL_PATH = "/workspace/tf_test_model/prunedGraph/graph_def.pb"
 DEFAULT_BATCH_SIZE = 100
 DEFAULT_OUTPUT_NODE_NAME = "predicts"
-DEFAULT_MUSA_PLUGIN_PATH = "/workspace/tensorflow_musa_extension/build/libmusa_plugin.so"
+DEFAULT_MUSA_PLUGIN_PATH = get_default_musa_plugin_path()
 DEFAULT_WARMUP_ROUNDS = 5
 DEFAULT_INFERENCE_ROUNDS = 20
+
+
+def create_session_config(
+    device_type: str = "CPU",
+    log_device_placement: bool = False,
+    logger: Optional[logging.Logger] = None,
+) -> tf.ConfigProto:
+    """Create a Session config and enable the MUSA graph optimizer when needed."""
+    config = tf.ConfigProto()
+    config.allow_soft_placement = True
+    config.log_device_placement = log_device_placement
+
+    device_type_upper = (device_type or "CPU").upper()
+    if device_type_upper == "CUDA":
+        config.gpu_options.allow_growth = True
+
+    if device_type_upper == "MUSA":
+        rewrite_options = config.graph_options.rewrite_options
+        rewrite_options.custom_optimizers.add().name = "musa_graph_optimizer"
+        if logger is not None:
+            logger.info("Enabled custom optimizer: musa_graph_optimizer")
+
+    return config
+
+
+def inspect_latest_after_fusion_dump(
+    logger: logging.Logger, output_node_name: str
+) -> None:
+    """Inspect the newest after_fusion dump and report whether MusaGelu is on
+    the execution path of the requested output tensor."""
+    graph_def, latest_dump = load_latest_after_fusion_graph_def()
+    if graph_def is None or latest_dump is None:
+        logger.info(
+            "GraphDef dump is disabled; skip optimized-graph inspection for MusaGelu."
+        )
+        return
+
+    nodes_by_name = {node.name: node for node in graph_def.node}
+    reachable_nodes = set()
+    pending = collections.deque([output_node_name])
+    while pending:
+        node_name = pending.popleft()
+        if node_name in reachable_nodes or node_name not in nodes_by_name:
+            continue
+        reachable_nodes.add(node_name)
+        for input_name in nodes_by_name[node_name].input:
+            producer_name = input_name[1:] if input_name.startswith("^") else input_name
+            producer_name = producer_name.split(":")[0]
+            pending.append(producer_name)
+
+    fused_nodes = [node for node in graph_def.node if node.op == "MusaGelu"]
+    reachable_fused = [node.name for node in fused_nodes if node.name in reachable_nodes]
+    reachable_legacy = [
+        node.name
+        for node in graph_def.node
+        if "/Gelu/" in node.name and node.op != "MusaGelu" and node.name in reachable_nodes
+    ]
+
+    logger.info("Latest after_fusion dump: %s", latest_dump)
+    logger.info(
+        "Detected %d MusaGelu node(s) in optimized graph, %d on the path to output '%s'",
+        len(fused_nodes),
+        len(reachable_fused),
+        output_node_name,
+    )
+    if reachable_fused:
+        logger.info("Reachable MusaGelu sample: %s", reachable_fused[:5])
+    if reachable_legacy:
+        logger.warning(
+            "Reachable legacy GELU nodes still remain: %s", reachable_legacy[:10]
+        )
+    else:
+        logger.info("No reachable legacy GELU nodes remain under /Gelu/ scope.")
 
 
 # ==========================================
@@ -92,9 +182,11 @@ class AccuracyComparator:
                 self.logger.error(f"  找不到输出张量 {output_node_name}:0")
                 return None
 
-            config = tf.ConfigProto()
-            config.allow_soft_placement = True
-            config.log_device_placement = False
+            config = create_session_config(
+                device_type=device_type,
+                log_device_placement=False,
+                logger=self.logger,
+            )
 
             with tf.compat.v1.Session(graph=graph, config=config) as sess:
                 try:
@@ -401,13 +493,11 @@ class GraphProfiler:
         self.logger.info("=" * 60)
         self.logger.info(f"Warmup rounds: {warmup_rounds}, Inference rounds: {inference_rounds}")
 
-        config = tf.ConfigProto()
-        config.allow_soft_placement = True
-        config.log_device_placement = False
-        
-        # 配置 GPU/CUDA 选项
-        if self.device_type == "CUDA":
-            config.gpu_options.allow_growth = True
+        config = create_session_config(
+            device_type=self.device_type,
+            log_device_placement=False,
+            logger=self.logger,
+        )
 
         with tf.compat.v1.Session(graph=self.graph, config=config) as sess:
             self.logger.info("\nStarting warmup rounds...")
@@ -476,13 +566,11 @@ class GraphProfiler:
         self.logger.info(f"整网性能分析 (Device: {self.device_type})")
         self.logger.info("=" * 60)
 
-        config = tf.ConfigProto()
-        config.allow_soft_placement = True
-        config.log_device_placement = False
-        
-        # 配置 GPU/CUDA 选项
-        if self.device_type == "CUDA":
-            config.gpu_options.allow_growth = True
+        config = create_session_config(
+            device_type=self.device_type,
+            log_device_placement=False,
+            logger=self.logger,
+        )
 
         with tf.compat.v1.Session(graph=self.graph, config=config) as sess:
             self.logger.info(f"\n预热阶段：{warmup_rounds} 轮...")
@@ -550,13 +638,11 @@ class GraphProfiler:
         self.logger.info("单算子性能分析 (Operator Performance)")
         self.logger.info("=" * 60)
 
-        config = tf.ConfigProto()
-        config.allow_soft_placement = True
-        config.log_device_placement = False
-        
-        # 配置 GPU/CUDA 选项
-        if self.device_type == "CUDA":
-            config.gpu_options.allow_growth = True
+        config = create_session_config(
+            device_type=self.device_type,
+            log_device_placement=False,
+            logger=self.logger,
+        )
 
         timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
         log_dir = os.path.join(self.trace_dir, f"ops_profile_{self.device_type}_{timestamp}")
@@ -602,10 +688,20 @@ class GraphProfiler:
             self.logger.info("无算子性能数据")
             return
 
-        # 构建 node_name -> op_type 的映射
+        # Build node_name -> op_type from the original graph first.
+        # If an after_fusion dump exists, overlay optimized op types so fused ops
+        # such as MusaGelu show up correctly in profiler summaries.
         op_type_map = {}
         for node in self.graph.as_graph_def().node:
             op_type_map[node.name] = node.op
+
+        optimized_op_type_map, optimized_dump = build_optimized_op_type_map()
+        if optimized_op_type_map:
+            op_type_map.update(optimized_op_type_map)
+            self.logger.info(
+                "Profiler op-type mapping overlaid from optimized graph: %s",
+                optimized_dump,
+            )
 
         self.logger.info("\n" + "=" * 80)
         self.logger.info(f"算子执行时间统计 (Device: {self.device_type})")
@@ -1061,13 +1157,11 @@ def run_inference(graph_def: graph_pb2.GraphDef, feed_dict: Dict, output_node_na
             logger.error(f"错误：找不到输出张量 {output_node_name}:0")
             return None
 
-        config = tf.ConfigProto()
-        config.allow_soft_placement = True
-        config.log_device_placement = log_device_placement
-        
-        # 配置 GPU/CUDA 选项
-        if device_type == "CUDA":
-            config.gpu_options.allow_growth = True
+        config = create_session_config(
+            device_type=device_type,
+            log_device_placement=log_device_placement,
+            logger=logger,
+        )
 
         with tf.compat.v1.Session(graph=graph, config=config) as sess:
             try:
@@ -1135,6 +1229,14 @@ def main():
 
   # 自定义配置
   python run_graph_tf_musa.py --device musa --batch-size 256 --warmup-rounds 10 --inference-rounds 50
+
+  # 手动指定相邻工作区中的插件路径（推荐）
+  python run_graph_tf_musa.py --device musa \
+    --musa-plugin ../tensorflow_musa_extension/build/libmusa_plugin.so
+
+  # 手动指定 Docker 中的绝对路径
+  python run_graph_tf_musa.py --device musa \
+    --musa-plugin /workspace/tensorflow_musa_extension/build/libmusa_plugin.so
         """
     )
 
@@ -1157,7 +1259,8 @@ def main():
     parser.add_argument('--device', type=str, choices=['cpu', 'musa', 'cuda'], default='musa',
                         help='运行设备：cpu、musa 或 cuda，默认：musa')
     parser.add_argument('--musa-plugin', type=str, default=DEFAULT_MUSA_PLUGIN_PATH,
-                        help=f'MUSA 插件路径，默认：{DEFAULT_MUSA_PLUGIN_PATH}')
+                        help='MUSA 插件路径。可手动填写相对路径或绝对路径；'
+                             f'留空时自动探测，当前默认解析为：{DEFAULT_MUSA_PLUGIN_PATH}')
     parser.add_argument('--log-device-placement', action='store_true',
                         help='记录每个算子的设备放置信息（默认：False）')
     parser.add_argument('--warmup-rounds', type=int, default=DEFAULT_WARMUP_ROUNDS,
@@ -1166,6 +1269,8 @@ def main():
                         help=f'推理轮数，默认：{DEFAULT_INFERENCE_ROUNDS}')
 
     args = parser.parse_args()
+    args.musa_plugin = resolve_musa_plugin_path(args.musa_plugin)
+    logger.info(f"Resolved MUSA plugin path: {args.musa_plugin}")
 
     # 精度对比模式需要 MUSA 插件
     if args.compare_accuracy or args.device == 'musa':
@@ -1219,6 +1324,7 @@ def main():
         else:
             logger.warning("\n⚠️  精度对比未通过，请检查报告中的详细信息。")
 
+        inspect_latest_after_fusion_dump(logger, args.output_node)
         logger.info(f"结果保存在: {log_mgr.trace_dir}")
 
         # 如果同时指定了其他模式，继续执行
@@ -1275,6 +1381,8 @@ def main():
                     inference_rounds=args.inference_rounds
                 )
                 profiler.print_performance_table(result)
+                if args.device == "musa":
+                    inspect_latest_after_fusion_dump(logger, args.output_node)
 
             logger.info(f"\nInference-only mode completed!")
             logger.info(f"Results saved in: {profiler.trace_dir}")
@@ -1306,6 +1414,8 @@ def main():
                 profiling_rounds=args.inference_rounds
             )
             profiler.print_performance_table(perf_result)
+            if args.device == "musa":
+                inspect_latest_after_fusion_dump(logger, args.output_node)
 
             profiler.profile_operator_times()
 
