@@ -9,8 +9,23 @@ standard_model/
 ├── prunedGraph/          # 剪枝后的图模型 (GraphDef格式)
 │   ├── run_graph_tf_musa.py    # 主要测试脚本
 │   └── logs/                   # 日志和trace文件输出目录
-└── wukong/               # Wukong深度学习模型
-    ├── run_wukong_tf_musa.py   # 主要测试脚本  
+├── wukong/               # Wukong深度学习模型
+│   ├── run_wukong_tf_musa.py   # 主要测试脚本  
+│   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
+│   └── logs/                   # 日志和trace文件输出目录
+├── rankmixer/               # rankmixer深度学习模型
+│   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
+│   └── logs/                   # 日志和trace文件输出目录
+├── onetrans/               # onetrans深度学习模型
+│   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
+│   └── logs/                   # 日志和trace文件输出目录
+├── tokenmixer-large/               # tokenmixer-large深度学习模型
+│   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
+│   └── logs/                   # 日志和trace文件输出目录
+├── fgcnn/               # fgcnn深度学习模型
+│   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
+│   └── logs/                   # 日志和trace文件输出目录
+└── fwfm/               # fwfm深度学习模型
     ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
     └── logs/                   # 日志和trace文件输出目录
 ```
@@ -46,7 +61,7 @@ standard_model/
 
 如果后续要开发 graph fusion，`prunedGraph` 是优先推荐的验证入口。
 
-### 2. wukong
+### 2. wukong / rankmixer / onetrans / tokenmixer-large / fwfm / fgcnn
 
 `wukong` 是一个 TensorFlow/Keras 模型脚本，适合验证：
 
@@ -69,6 +84,17 @@ standard_model/
 - `Send`（跨设备数据搬运事件，在 profiler 中可见）
 
 需要注意的是，当前 `wukong` 模型本身使用的是 `ReLU`，不是 `GELU`，因此它不适合作为 `MusaGelu` 融合命中的验证模型；但它仍然适合验证插件加载、设备执行和整网性能。
+
+- `rankmixer` / `onetrans` / `tokenmixer-large` / `fwfm` / `fgcnn` 和 `wukong` 类似，需要测试下算子通过性
+
+|模型|通过性|
+:---:|:---:|
+wukong|✅
+rankmixer|✅
+onetrans|✅
+tokenmixer-large|✅
+fwfm|✅
+fgcnn|❌
 
 ## 通用命令行参数
 
