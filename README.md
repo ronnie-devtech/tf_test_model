@@ -61,7 +61,7 @@ standard_model/
 
 如果后续要开发 graph fusion，`prunedGraph` 是优先推荐的验证入口。
 
-### 2. wukong / rankmixer / onetrans / tokenmixer-large / fwfm / fgcnn
+### 2. wukong / rankmixer / onetrans / tokenmixer-large / fwfm / fgcnn / xdeepfm / dien / dsin
 
 `wukong` 是一个 TensorFlow/Keras 模型脚本，适合验证：
 
@@ -85,7 +85,7 @@ standard_model/
 
 需要注意的是，当前 `wukong` 模型本身使用的是 `ReLU`，不是 `GELU`，因此它不适合作为 `MusaGelu` 融合命中的验证模型；但它仍然适合验证插件加载、设备执行和整网性能。
 
-- `rankmixer` / `onetrans` / `tokenmixer-large` / `fwfm` / `fgcnn` 和 `wukong` 类似，需要测试下算子通过性
+- `rankmixer` / `onetrans` / `tokenmixer-large` / `fwfm` / `fgcnn` / `xdeepfm` / `dien` / `dsin` 和 `wukong` 类似，需要测试下算子通过性
 
 |模型|通过性|
 :---:|:---:|
@@ -94,7 +94,10 @@ rankmixer|✅
 onetrans|✅
 tokenmixer-large|✅
 fwfm|✅
+xdeepfm|✅
+dsin|✅
 fgcnn|❌
+dien|❌
 
 ## 通用命令行参数
 
