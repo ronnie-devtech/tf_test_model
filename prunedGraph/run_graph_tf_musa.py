@@ -57,12 +57,12 @@ tf.disable_eager_execution()
 # ==========================================
 # 全局配置
 # ==========================================
-DEFAULT_MODEL_PATH = "/workspace/tf_test_model/prunedGraph/graph_def.pb"
+DEFAULT_MODEL_PATH = "./graph_def.pb"
 DEFAULT_BATCH_SIZE = 100
 DEFAULT_OUTPUT_NODE_NAME = "predicts"
 DEFAULT_MUSA_PLUGIN_PATH = get_default_musa_plugin_path()
 DEFAULT_WARMUP_ROUNDS = 5
-DEFAULT_INFERENCE_ROUNDS = 20
+DEFAULT_INFERENCE_ROUNDS = 200
 
 
 def create_session_config(
@@ -72,7 +72,7 @@ def create_session_config(
 ) -> tf.ConfigProto:
     """Create a Session config and enable the MUSA graph optimizer when needed."""
     config = tf.ConfigProto()
-    config.allow_soft_placement = True
+    config.allow_soft_placement = False
     config.log_device_placement = log_device_placement
 
     device_type_upper = (device_type or "CPU").upper()
@@ -486,6 +486,38 @@ class GraphProfiler:
         self.logger = self.log_mgr.get_logger("profiler", "inference.log")
         self.trace_dir = self.log_mgr.trace_dir
 
+    @staticmethod
+    def compute_trimmed_stats(times: List[float], trim_ratio: float = 0.1) -> Dict[str, float]:
+        """计算截断平均值和标准差（去掉前后各 trim_ratio 比例的数据）
+
+        Args:
+            times: 时间列表
+            trim_ratio: 前后各去掉的比例，默认 0.1（即去掉前后各 10%，保留中间 80%）
+
+        Returns:
+            包含 trimmed_avg, std, valid_count 等信息的字典
+        """
+        if len(times) < 3:
+            # 数据太少，不截断
+            trimmed_times = times
+        else:
+            sorted_times = sorted(times)
+            n = len(sorted_times)
+            trim_count = int(n * trim_ratio)
+            # 确保至少保留 1 个数据
+            trim_count = min(trim_count, (n - 1) // 2)
+            trimmed_times = sorted_times[trim_count:n - trim_count] if trim_count > 0 else sorted_times
+
+        trimmed_avg = sum(trimmed_times) / len(trimmed_times) if trimmed_times else 0.0
+        std_dev = float(np.std(trimmed_times)) if len(trimmed_times) > 1 else 0.0
+
+        return {
+            'trimmed_avg': trimmed_avg,
+            'std': std_dev,
+            'valid_count': len(trimmed_times),
+            'trimmed_times': trimmed_times
+        }
+
     def run_inference_only(self, warmup_rounds: int = 5, inference_rounds: int = 20) -> Dict[str, Any]:
         """仅运行 warmup 和 inference，不进行其他分析"""
         self.logger.info("=" * 60)
@@ -518,37 +550,35 @@ class GraphProfiler:
                     self.logger.info(f"  Inference round {i + 1}/{inference_rounds} completed, "
                                     f"time: {iteration_time:.4f}s")
 
-        avg_time = sum(times) / len(times)
-        min_time = min(times)
-        max_time = max(times)
-        throughput_avg = self.batch_size / avg_time
-        throughput_min = self.batch_size / max_time
-        throughput_max = self.batch_size / min_time
+        # 计算截断统计（去掉前后各 10%，保留中间 80%）
+        stats = self.compute_trimmed_stats(times, trim_ratio=0.1)
+        trimmed_avg = stats['trimmed_avg']
+        std_dev = stats['std']
+        valid_count = stats['valid_count']
+
+        # 计算吞吐量（基于截断平均值）
+        throughput_avg = self.batch_size / trimmed_avg
 
         self.logger.info("\n" + "=" * 60)
-        self.logger.info("INFERENCE-ONLY RESULTS")
+        self.logger.info("INFERENCE-ONLY RESULTS (Trimmed Mean: 80%)")
         self.logger.info("=" * 60)
-        self.logger.info(f"Average inference time: {avg_time:.6f} seconds")
-        self.logger.info(f"Min inference time:     {min_time:.6f} seconds")
-        self.logger.info(f"Max inference time:     {max_time:.6f} seconds")
+        self.logger.info(f"Total inference rounds: {inference_rounds}")
+        self.logger.info(f"Valid samples (after trimming): {valid_count}")
+        self.logger.info(f"Average inference time: {trimmed_avg:.6f} seconds")
         self.logger.info(f"Average throughput:     {throughput_avg:.2f} samples/second")
-        self.logger.info(f"Max throughput:         {throughput_max:.2f} samples/second")
-        self.logger.info(f"Min throughput:         {throughput_min:.2f} samples/second")
-        self.logger.info(f"Standard deviation:     {np.std(times):.6f} seconds")
+        self.logger.info(f"Standard deviation:     {std_dev:.6f} seconds")
         self.logger.info("=" * 60)
 
         perf_result = {
             'device_type': self.device_type,
             'warmup_rounds': warmup_rounds,
             'inference_rounds': inference_rounds,
-            'average_time': avg_time,
-            'min_time': min_time,
-            'max_time': max_time,
+            'valid_samples': valid_count,
+            'average_time': trimmed_avg,
             'average_throughput': throughput_avg,
-            'max_throughput': throughput_max,
-            'min_throughput': throughput_min,
-            'std_deviation': float(np.std(times)),
+            'std_deviation': std_dev,
             'all_times': [float(t) for t in times],
+            'trimmed_times': stats['trimmed_times'],
             'batch_size': self.batch_size
         }
 
@@ -590,37 +620,35 @@ class GraphProfiler:
                 if (i + 1) % 5 == 0:
                     self.logger.info(f"  分析轮次 {i + 1}/{profiling_rounds} 完成，耗时：{iteration_time:.4f}s")
 
-        avg_time = sum(times) / len(times)
-        min_time = min(times)
-        max_time = max(times)
-        throughput_avg = self.batch_size / avg_time
-        throughput_min = self.batch_size / max_time
-        throughput_max = self.batch_size / min_time
+        # 计算截断统计（去掉前后各 10%，保留中间 80%）
+        stats = self.compute_trimmed_stats(times, trim_ratio=0.1)
+        trimmed_avg = stats['trimmed_avg']
+        std_dev = stats['std']
+        valid_count = stats['valid_count']
+
+        # 计算吞吐量（基于截断平均值）
+        throughput_avg = self.batch_size / trimmed_avg
 
         self.logger.info("\n" + "=" * 60)
-        self.logger.info("整网性能分析结果")
+        self.logger.info("整网性能分析结果 (Trimmed Mean: 80%)")
         self.logger.info("=" * 60)
-        self.logger.info(f"平均推理时间：    {avg_time:.6f} 秒")
-        self.logger.info(f"最小推理时间：    {min_time:.6f} 秒")
-        self.logger.info(f"最大推理时间：    {max_time:.6f} 秒")
-        self.logger.info(f"平均吞吐量：      {throughput_avg:.2f} samples/秒")
-        self.logger.info(f"最大吞吐量：      {throughput_max:.2f} samples/秒")
-        self.logger.info(f"最小吞吐量：      {throughput_min:.2f} samples/秒")
-        self.logger.info(f"标准差：          {np.std(times):.6f} 秒")
+        self.logger.info(f"总分析轮次：        {profiling_rounds}")
+        self.logger.info(f"有效样本数：        {valid_count}")
+        self.logger.info(f"平均推理时间：      {trimmed_avg:.6f} 秒")
+        self.logger.info(f"平均吞吐量：        {throughput_avg:.2f} samples/秒")
+        self.logger.info(f"标准差：            {std_dev:.6f} 秒")
         self.logger.info("=" * 60)
 
         perf_result = {
             'device_type': self.device_type,
             'warmup_rounds': warmup_rounds,
             'profiling_rounds': profiling_rounds,
-            'average_time': avg_time,
-            'min_time': min_time,
-            'max_time': max_time,
+            'valid_samples': valid_count,
+            'average_time': trimmed_avg,
             'average_throughput': throughput_avg,
-            'max_throughput': throughput_max,
-            'min_throughput': throughput_min,
-            'std_deviation': float(np.std(times)),
+            'std_deviation': std_dev,
             'all_times': [float(t) for t in times],
+            'trimmed_times': stats['trimmed_times'],
             'batch_size': self.batch_size
         }
 
@@ -953,22 +981,20 @@ class GraphProfiler:
     def print_performance_table(self, perf_result: Dict[str, Any]) -> None:
         """使用 prettytable 打印性能结果表格"""
         self.logger.info("=" * 60)
-        self.logger.info("PERFORMANCE SUMMARY")
+        self.logger.info("PERFORMANCE SUMMARY (Trimmed Mean: 80%)")
         self.logger.info("=" * 60)
         self.logger.info(f"Device: {perf_result['device_type']}")
         self.logger.info(f"Batch Size: {perf_result['batch_size']}")
+        self.logger.info(f"Total Rounds: {perf_result.get('inference_rounds', perf_result.get('profiling_rounds', 'N/A'))}")
+        self.logger.info(f"Valid Samples: {perf_result.get('valid_samples', 'N/A')}")
         self.logger.info(f"Average Time (s): {perf_result['average_time']:.6f}")
-        self.logger.info(f"Min Time (s): {perf_result['min_time']:.6f}")
-        self.logger.info(f"Max Time (s): {perf_result['max_time']:.6f}")
         self.logger.info(f"Avg Throughput (samples/s): {perf_result['average_throughput']:.2f}")
-        self.logger.info(f"Max Throughput (samples/s): {perf_result['max_throughput']:.2f}")
-        self.logger.info(f"Min Throughput (samples/s): {perf_result['min_throughput']:.2f}")
         self.logger.info(f"Std Deviation (s): {perf_result['std_deviation']:.6f}")
         self.logger.info("=" * 60)
 
         if PRETTYTABLE_AVAILABLE:
             print("\n" + "=" * 60)
-            print("PERFORMANCE SUMMARY")
+            print("PERFORMANCE SUMMARY (Trimmed Mean: 80%)")
             print("=" * 60)
 
             table = PrettyTable()
@@ -978,12 +1004,10 @@ class GraphProfiler:
 
             table.add_row(["Device", perf_result['device_type']])
             table.add_row(["Batch Size", perf_result['batch_size']])
+            table.add_row(["Total Rounds", perf_result.get('inference_rounds', perf_result.get('profiling_rounds', 'N/A'))])
+            table.add_row(["Valid Samples", perf_result.get('valid_samples', 'N/A')])
             table.add_row(["Average Time (s)", f"{perf_result['average_time']:.6f}"])
-            table.add_row(["Min Time (s)", f"{perf_result['min_time']:.6f}"])
-            table.add_row(["Max Time (s)", f"{perf_result['max_time']:.6f}"])
             table.add_row(["Avg Throughput (samples/s)", f"{perf_result['average_throughput']:.2f}"])
-            table.add_row(["Max Throughput (samples/s)", f"{perf_result['max_throughput']:.2f}"])
-            table.add_row(["Min Throughput (samples/s)", f"{perf_result['min_throughput']:.2f}"])
             table.add_row(["Std Deviation (s)", f"{perf_result['std_deviation']:.6f}"])
 
             print(table)
@@ -1371,7 +1395,7 @@ def main():
                     batch_size=args.batch_size,
                     enable_profiling=False,
                     warmup_rounds=args.warmup_rounds,
-                    inference_rounds=args.warmup_rounds,
+                    inference_rounds=args.inference_rounds,
                     log_device_placement=args.log_device_placement
                 )
                 profiler.profile_operator_times(warmup_rounds=3)
@@ -1405,7 +1429,7 @@ def main():
                 batch_size=args.batch_size,
                 enable_profiling=False,
                 warmup_rounds=args.warmup_rounds,
-                inference_rounds=args.warmup_rounds,
+                inference_rounds=args.inference_rounds,
                 log_device_placement=args.log_device_placement
             )
 
