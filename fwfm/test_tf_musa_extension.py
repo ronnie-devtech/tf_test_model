@@ -25,8 +25,8 @@ tf.load_library(plugin_path)
 
 import numpy as np
 
-from model.tensorflow.fwfm import FwFM
-from model.tensorflow.lr_schedule import LinearWarmup
+from model.fwfm import FwFM
+from model.lr_schedule import LinearWarmup
 
 # Example sibling-workspace path (preferred):
 #   ../tensorflow_musa_extension/build/libmusa_plugin.so
@@ -53,22 +53,16 @@ DIM_OUTPUT = 1
 ####################################################################################################
 #                                   MODEL SPECIFIC CONFIGURATION                                   #
 ####################################################################################################
-NUM_LAYERS = 2  # number of Wukong layers
 DIM_EMB = 128  # dimension of embeddings
-DROPOUT = 0.5  # dropout rate
-BIAS = False  # whether to use bias terms in the model
 
 ####################################################################################################
 #                                           CREATE MODEL                                           #
 ####################################################################################################
 model = FwFM(
-    num_layers=NUM_LAYERS,
     num_sparse_embs=NUM_SPARSE_EMBS,
     dim_input_sparse=NUM_CAT_FEATURES,
     dim_input_dense=NUM_DENSE_FEATURES,
     dim_emb=DIM_EMB,
-    dropout=DROPOUT,
-    bias=BIAS,
 )
 
 ####################################################################################################

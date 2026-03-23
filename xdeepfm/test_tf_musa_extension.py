@@ -25,8 +25,8 @@ tf.load_library(plugin_path)
 
 import numpy as np
 
-from model.tensorflow.xdeepfm import XDeepFM
-from model.tensorflow.lr_schedule import LinearWarmup
+from model.xdeepfm import XDeepFM
+from model.lr_schedule import LinearWarmup
 
 # Example sibling-workspace path (preferred):
 #   ../tensorflow_musa_extension/build/libmusa_plugin.so

@@ -25,8 +25,8 @@ tf.load_library(plugin_path)
 
 import numpy as np
 
-from model.tensorflow.onetrans import OneTrans
-from model.tensorflow.lr_schedule import LinearWarmup
+from model.onetrans import OneTrans
+from model.lr_schedule import LinearWarmup
 
 # Example sibling-workspace path (preferred):
 #   ../tensorflow_musa_extension/build/libmusa_plugin.so
@@ -53,12 +53,14 @@ DIM_OUTPUT = 1
 ####################################################################################################
 #                                   MODEL SPECIFIC CONFIGURATION                                   #
 ####################################################################################################
-LS = 16
-LNS = 16
+NUM_LAYERS = 3
+LS = 26
+LNS = 13
 DIM_EMB = 128
 NUM_HEADS = (
     16  # number of attention heads in the token mixer（H in the paper）H must same as T
 )
+D_FF = 512
 NUM_HIDDEN_HEAD = 2
 DIM_HIDDEN_HEAD = 256
 DROPOUT = 0.5
@@ -69,18 +71,15 @@ GRAD_MAX_NORM = 1.0
 #                                           CREATE MODEL                                           #
 ####################################################################################################
 model = OneTrans(
+    num_layers=NUM_LAYERS,
     LS=LS,
     LNS=LNS,
     dim_emb=DIM_EMB,
     num_heads=NUM_HEADS,
-    d_ff=NUM_HEADS * DIM_EMB,
+    d_ff=D_FF,
     num_sparse_embs=NUM_SPARSE_EMBS,
-    dim_input_dense=NUM_DENSE_FEATURES,
     num_hidden_head=NUM_HIDDEN_HEAD,
     dim_hidden_head=DIM_HIDDEN_HEAD,
-    dim_output=DIM_OUTPUT,
-    dropout=DROPOUT,
-    bias=BIAS,
 )
 
 ####################################################################################################

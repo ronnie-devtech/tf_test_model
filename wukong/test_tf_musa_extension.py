@@ -14,7 +14,7 @@ parser.add_argument(
     nargs="?",
     default=get_default_musa_plugin_path(),
     help="Path to the TensorFlow MUSA library .so file "
-         "(defaults to the auto-detected sibling build path)",
+    "(defaults to the auto-detected sibling build path)",
 )
 args = parser.parse_args()
 plugin_path = resolve_musa_plugin_path(args.tensorflow_musa_library_path)
@@ -25,8 +25,8 @@ tf.load_library(plugin_path)
 
 import numpy as np
 
-from model.tensorflow.wukong import Wukong
-from model.tensorflow.lr_schedule import LinearWarmup
+from model.wukong import Wukong
+from model.lr_schedule import LinearWarmup
 
 # Example sibling-workspace path (preferred):
 #   ../tensorflow_musa_extension/build/libmusa_plugin.so
@@ -53,17 +53,17 @@ DIM_OUTPUT = 1
 ####################################################################################################
 #                                   MODEL SPECIFIC CONFIGURATION                                   #
 ####################################################################################################
-NUM_LAYERS = 1  # number of Wukong layers
-DIM_EMB = 32  # dimension of embeddings
-NUM_EMB_LCB = 2  # number of low-rank components for embedding compression in LCB
-NUM_EMB_FMB = 2  # number of factors for multi-branch factorization in FMB
-RANK_FMB = 2  # rank for multi-branch factorization in FMB
-NUM_HIDDEN_WUKONG = 2  # number of hidden layers in Wukong MLPs
-DIM_HIDDEN_WUKONG = 32  # dimension of hidden layers in Wukong MLPs
+NUM_LAYERS = 2  # number of Wukong layers
+DIM_EMB = 128  # dimension of embeddings
+NUM_EMB_LCB = 32  # number of low-rank components for embedding compression in LCB
+NUM_EMB_FMB = 32  # number of factors for multi-branch factorization in FMB
+RANK_FMB = 24  # rank for multi-branch factorization in FMB
+NUM_HIDDEN_WUKONG = 3  # number of hidden layers in Wukong MLPs
+DIM_HIDDEN_WUKONG = 2048  # dimension of hidden layers in Wukong MLPs
 NUM_HIDDEN_HEAD = 2  # number of hidden layers in the final prediction head MLPs
-DIM_HIDDEN_HEAD = 16  # dimension of hidden layers in the final prediction head
+DIM_HIDDEN_HEAD = 256  # dimension of hidden layers in the final prediction head
 DROPOUT = 0.5  # dropout rate
-BIAS = True  # whether to use bias terms in the model
+BIAS = False  # whether to use bias terms in the model
 
 ####################################################################################################
 #                                           CREATE MODEL                                           #

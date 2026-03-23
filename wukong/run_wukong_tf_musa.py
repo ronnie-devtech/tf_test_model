@@ -17,7 +17,7 @@ import threading
 import collections
 
 # 添加项目根目录到 Python 路径
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from tf_test_model.utils import (
     build_optimized_op_type_map,
     get_default_musa_plugin_path,
@@ -28,6 +28,7 @@ from tf_test_model.utils import (
 try:
     import tensorflow as tf
     import numpy as np
+
     TF_AVAILABLE = True
 except ImportError as e:
     print(f"Error importing TensorFlow: {e}")
@@ -42,7 +43,7 @@ tf.random.set_seed(SEED)
 
 # 只有在 TensorFlow 可用时才导入模型
 if TF_AVAILABLE:
-    from model.tensorflow.wukong import Wukong
+    from model.wukong import Wukong
 
 
 class InferenceProfiler:
@@ -67,7 +68,9 @@ class InferenceProfiler:
 
     def __init__(self, batch_size: int = 1024, device_type: str = "MUSA"):
         if not TF_AVAILABLE:
-            raise RuntimeError("TensorFlow is not available. Please install TensorFlow to use this script.")
+            raise RuntimeError(
+                "TensorFlow is not available. Please install TensorFlow to use this script."
+            )
 
         self.batch_size = batch_size
         self.device_type = device_type.upper()
@@ -76,8 +79,9 @@ class InferenceProfiler:
         self.trace_dir = self.log_mgr.trace_dir
         self.setup_model_and_data()
         self.profile_ops = False  # Flag to enable operator profiling
-        self.operator_timings = collections.defaultdict(list)  # Store operator timing data
-
+        self.operator_timings = collections.defaultdict(
+            list
+        )  # Store operator timing data
 
     def setup_model_and_data(self):
         """设置模型和测试数据"""
@@ -85,9 +89,32 @@ class InferenceProfiler:
         self.num_cat_features = 26
         self.num_dense_features = 13
         self.num_sparse_embs = [
-            1460, 583, 10131227, 2202608, 305, 24, 12517, 633, 3, 93145,
-            5683, 8351593, 3194, 27, 14992, 5461306, 10, 5652, 2173, 4,
-            7046547, 18, 15, 286181, 105, 142572
+            1460,
+            583,
+            10131227,
+            2202608,
+            305,
+            24,
+            12517,
+            633,
+            3,
+            93145,
+            5683,
+            8351593,
+            3194,
+            27,
+            14992,
+            5461306,
+            10,
+            5652,
+            2173,
+            4,
+            7046547,
+            18,
+            15,
+            286181,
+            105,
+            142572,
         ]
 
         # 创建模型
@@ -115,10 +142,16 @@ class InferenceProfiler:
         _ = self.model((dummy_sparse, dummy_dense))
 
         # 创建有效的测试数据
-        self.test_sparse, self.test_dense = self._create_valid_test_data(self.batch_size)
+        self.test_sparse, self.test_dense = self._create_valid_test_data(
+            self.batch_size
+        )
 
-        self.logger.info(f"Model created with {len(self.model.trainable_variables)} trainable variables")
-        self.logger.info(f"Test data shapes - Sparse: {self.test_sparse.shape}, Dense: {self.test_dense.shape}")
+        self.logger.info(
+            f"Model created with {len(self.model.trainable_variables)} trainable variables"
+        )
+        self.logger.info(
+            f"Test data shapes - Sparse: {self.test_sparse.shape}, Dense: {self.test_dense.shape}"
+        )
 
     def _create_valid_test_data(self, batch_size: int):
         """创建有效的测试数据，确保稀疏特征索引不越界"""
@@ -127,10 +160,7 @@ class InferenceProfiler:
         for emb_size in self.num_sparse_embs:
             # 生成 [0, emb_size) 范围内的随机整数
             indices = tf.random.uniform(
-                (batch_size,),
-                minval=0,
-                maxval=emb_size,
-                dtype=tf.int32
+                (batch_size,), minval=0, maxval=emb_size, dtype=tf.int32
             )
             sparse_data.append(indices)
 
@@ -149,7 +179,7 @@ class InferenceProfiler:
         self.logger.info(f"Available devices: {[d.name for d in devices]}")
 
         # 检查是否有MUSA设备
-        musa_devices = tf.config.list_physical_devices('MUSA')
+        musa_devices = tf.config.list_physical_devices("MUSA")
         if not musa_devices:
             # raise RuntimeError("未检测到 MUSA 设备，请检查驱动和 TensorFlow-MUSA 安装")
             print("No MUSA devices found, falling back to CPU")
@@ -164,19 +194,23 @@ class InferenceProfiler:
         # 尝试在不同设备上运行以确定实际使用的设备
         try:
             if musa_devices:
-                with tf.device('/device:MUSA:0'):
-                    result = self.model((self.test_sparse, self.test_dense), training=False)
+                with tf.device("/device:MUSA:0"):
+                    result = self.model(
+                        (self.test_sparse, self.test_dense), training=False
+                    )
                     self.logger.info("Model successfully ran on MUSA device")
                     return "MUSA"
             else:
-                with tf.device('/CPU:0'):
-                    result = self.model((self.test_sparse, self.test_dense), training=False)
+                with tf.device("/CPU:0"):
+                    result = self.model(
+                        (self.test_sparse, self.test_dense), training=False
+                    )
                     self.logger.info("Model running on CPU")
                     return "CPU"
         except Exception as e:
             self.logger.warning(f"Failed to run on preferred device: {e}")
             # 回退到CPU
-            with tf.device('/CPU:0'):
+            with tf.device("/CPU:0"):
                 result = self.model((self.test_sparse, self.test_dense), training=False)
                 self.logger.info("Model running on CPU (fallback)")
                 return "CPU"
@@ -189,14 +223,12 @@ class InferenceProfiler:
 
         # 预热运行，确保所有算子都被初始化
         _ = self.model(inputs, training=False)
-        if hasattr(tf, 'musa') and tf.config.list_physical_devices('/device:MUSA:0'):
+        if hasattr(tf, "musa") and tf.config.list_physical_devices("/device:MUSA:0"):
             tf.musa.synchronize()
 
         # 开始性能分析 - use a specific profiler options
         options = tf.profiler.experimental.ProfilerOptions(
-            host_tracer_level=2,
-            python_tracer_level=0,
-            device_tracer_level=1
+            host_tracer_level=2, python_tracer_level=0, device_tracer_level=1
         )
 
         tf.profiler.experimental.start(log_dir, options=options)
@@ -207,7 +239,7 @@ class InferenceProfiler:
         end_time = time.time()
 
         # 确保设备同步
-        if hasattr(tf, 'musa') and tf.config.list_physical_devices('/device:MUSA:0'):
+        if hasattr(tf, "musa") and tf.config.list_physical_devices("/device:MUSA:0"):
             tf.musa.synchronize()
 
         # 停止性能分析
@@ -226,28 +258,30 @@ class InferenceProfiler:
         trace_files = []
         for root, dirs, files in os.walk(log_dir):
             for file in files:
-                if file.endswith('.json') and ('trace' in file.lower() or 'profiler' in file.lower()):
+                if file.endswith(".json") and (
+                    "trace" in file.lower() or "profiler" in file.lower()
+                ):
                     trace_files.append(os.path.join(root, file))
 
         # Look for compressed trace files (.json.gz)
         if not trace_files:
             for root, dirs, files in os.walk(log_dir):
                 for file in files:
-                    if file.endswith('.json.gz') and 'trace' in file.lower():
+                    if file.endswith(".json.gz") and "trace" in file.lower():
                         trace_files.append(os.path.join(root, file))
 
         # If no files found with 'trace' or 'profiler' in name, try any .json file
         if not trace_files:
             for root, dirs, files in os.walk(log_dir):
                 for file in files:
-                    if file.endswith('.json'):
+                    if file.endswith(".json"):
                         trace_files.append(os.path.join(root, file))
 
         # Also look for any .json.gz files if no .json files found
         if not trace_files:
             for root, dirs, files in os.walk(log_dir):
                 for file in files:
-                    if file.endswith('.json.gz'):
+                    if file.endswith(".json.gz"):
                         trace_files.append(os.path.join(root, file))
 
         if not trace_files:
@@ -267,14 +301,15 @@ class InferenceProfiler:
         # 解析第一个trace文件
         trace_file = trace_files[0]
         try:
-            if trace_file.endswith('.gz'):
+            if trace_file.endswith(".gz"):
                 # Handle compressed file
                 import gzip
-                with gzip.open(trace_file, 'rt', encoding='utf-8') as f:
+
+                with gzip.open(trace_file, "rt", encoding="utf-8") as f:
                     trace_data = json.load(f)
             else:
                 # Handle regular JSON file
-                with open(trace_file, 'r') as f:
+                with open(trace_file, "r") as f:
                     trace_data = json.load(f)
 
             optimized_op_type_map, optimized_dump = build_optimized_op_type_map(
@@ -292,21 +327,21 @@ class InferenceProfiler:
                 )
 
             # 提取事件信息
-            events = trace_data.get('traceEvents', [])
+            events = trace_data.get("traceEvents", [])
 
             # 统计每个算子的执行时间
             op_times = collections.defaultdict(float)
             op_counts = collections.defaultdict(int)
 
             for event in events:
-                if event.get('ph') == 'X':  # Complete events
-                    op_name = event.get('name', 'unknown')
-                    if (
-                        op_name in self._FILTERED_PROFILE_NAMES
-                        or any(op_name.startswith(prefix) for prefix in self._FILTERED_PROFILE_PREFIXES)
+                if event.get("ph") == "X":  # Complete events
+                    op_name = event.get("name", "unknown")
+                    if op_name in self._FILTERED_PROFILE_NAMES or any(
+                        op_name.startswith(prefix)
+                        for prefix in self._FILTERED_PROFILE_PREFIXES
                     ):
                         continue
-                    duration = event.get('dur', 0)  # Duration in microseconds
+                    duration = event.get("dur", 0)  # Duration in microseconds
 
                     # Convert to milliseconds for readability
                     op_times[op_name] += duration / 1000.0
@@ -316,13 +351,17 @@ class InferenceProfiler:
             for op_name, total_time in op_times.items():
                 inferred_op_type = optimized_op_type_map.get(op_name)
                 if not inferred_op_type:
-                    inferred_op_type = "Send" if op_name.startswith("_Send input ") else op_name
-                self.operator_timings[op_name].append({
-                    'op_type': inferred_op_type,
-                    'total_time_ms': total_time,
-                    'count': op_counts[op_name],
-                    'avg_time_ms': total_time / op_counts[op_name]
-                })
+                    inferred_op_type = (
+                        "Send" if op_name.startswith("_Send input ") else op_name
+                    )
+                self.operator_timings[op_name].append(
+                    {
+                        "op_type": inferred_op_type,
+                        "total_time_ms": total_time,
+                        "count": op_counts[op_name],
+                        "avg_time_ms": total_time / op_counts[op_name],
+                    }
+                )
 
             self.logger.info(f"Parsed operator timings from {trace_file}")
             self.logger.info(f"Found {len(op_times)} unique operators")
@@ -344,21 +383,25 @@ class InferenceProfiler:
         all_op_stats = []
         for op_name, timing_data in self.operator_timings.items():
             # Calculate aggregated stats for this operator
-            total_time = sum([item['total_time_ms'] for item in timing_data])
-            total_count = sum([item['count'] for item in timing_data])
+            total_time = sum([item["total_time_ms"] for item in timing_data])
+            total_count = sum([item["count"] for item in timing_data])
             avg_time = total_time / total_count if total_count > 0 else 0
-            op_type = timing_data[0].get('op_type', 'unknown') if timing_data else 'unknown'
+            op_type = (
+                timing_data[0].get("op_type", "unknown") if timing_data else "unknown"
+            )
 
-            all_op_stats.append({
-                'name': op_name,
-                'op_type': op_type,
-                'total_time_ms': total_time,
-                'count': total_count,
-                'avg_time_ms': avg_time
-            })
+            all_op_stats.append(
+                {
+                    "name": op_name,
+                    "op_type": op_type,
+                    "total_time_ms": total_time,
+                    "count": total_count,
+                    "avg_time_ms": avg_time,
+                }
+            )
 
         # Sort by total time (descending)
-        all_op_stats.sort(key=lambda x: x['total_time_ms'], reverse=True)
+        all_op_stats.sort(key=lambda x: x["total_time_ms"], reverse=True)
 
         # Print top operators by total time
         self.logger.info(
@@ -377,23 +420,32 @@ class InferenceProfiler:
 
         # Save operator timing results
         op_timing_file = os.path.join(self.trace_dir, "operator_timings.json")
-        with open(op_timing_file, 'w') as f:
-            json.dump({
-                'operators': [
-                    {
-                        'name': stat['name'],
-                        'op_type': stat['op_type'],
-                        'total_time_ms': stat['total_time_ms'],
-                        'count': stat['count'],
-                        'avg_time_ms': stat['avg_time_ms']
-                    } for stat in all_op_stats
-                ],
-                'summary': {
-                    'total_operators': len(all_op_stats),
-                    'top_10_total_time': sum(stat['total_time_ms'] for stat in all_op_stats[:10]),
-                    'all_operators_total_time': sum(stat['total_time_ms'] for stat in all_op_stats)
-                }
-            }, f, indent=2)
+        with open(op_timing_file, "w") as f:
+            json.dump(
+                {
+                    "operators": [
+                        {
+                            "name": stat["name"],
+                            "op_type": stat["op_type"],
+                            "total_time_ms": stat["total_time_ms"],
+                            "count": stat["count"],
+                            "avg_time_ms": stat["avg_time_ms"],
+                        }
+                        for stat in all_op_stats
+                    ],
+                    "summary": {
+                        "total_operators": len(all_op_stats),
+                        "top_10_total_time": sum(
+                            stat["total_time_ms"] for stat in all_op_stats[:10]
+                        ),
+                        "all_operators_total_time": sum(
+                            stat["total_time_ms"] for stat in all_op_stats
+                        ),
+                    },
+                },
+                f,
+                indent=2,
+            )
 
         self.logger.info(f"Operator timing results saved to: {op_timing_file}")
         self.logger.info("=" * 80)
@@ -413,7 +465,7 @@ class InferenceProfiler:
             _ = self.inference_step((self.test_sparse, self.test_dense))
 
         # 确保设备同步
-        if hasattr(tf, 'musa') and tf.config.list_physical_devices('/device:MUSA:0'):
+        if hasattr(tf, "musa") and tf.config.list_physical_devices("/device:MUSA:0"):
             tf.musa.synchronize()
 
         # 启动性能分析
@@ -429,9 +481,10 @@ class InferenceProfiler:
             tf.profiler.experimental.stop()
 
             # 确保设备同步以获得准确的时间
-            if hasattr(tf, 'musa') and tf.config.list_physical_devices('/device:MUSA:0'):
+            if hasattr(tf, "musa") and tf.config.list_physical_devices(
+                "/device:MUSA:0"
+            ):
                 tf.musa.synchronize()
-
 
         except AttributeError:
             # 如果profiler不可用，回退到基本计时
@@ -441,19 +494,23 @@ class InferenceProfiler:
             end_time = time.time()
 
             # 确保设备同步
-            if hasattr(tf, 'musa') and tf.config.list_physical_devices('/device:MUSA:0'):
+            if hasattr(tf, "musa") and tf.config.list_physical_devices(
+                "/device:MUSA:0"
+            ):
                 tf.musa.synchronize()
 
         inference_time = end_time - start_time
         self.logger.info(f"Inference completed in {inference_time:.4f} seconds")
-        self.logger.info(f"Throughput: {self.batch_size / inference_time:.2f} samples/second")
+        self.logger.info(
+            f"Throughput: {self.batch_size / inference_time:.2f} samples/second"
+        )
         self.logger.info(f"Result shape: {result.shape}, dtype: {result.dtype}")
 
         # 检查trace文件是否生成
         trace_files = []
         for root, dirs, files in os.walk(self.trace_dir):
             for file in files:
-                if file.endswith('.json') or 'trace' in file.lower():
+                if file.endswith(".json") or "trace" in file.lower():
                     trace_files.append(os.path.join(root, file))
 
         if trace_files:
@@ -468,13 +525,17 @@ class InferenceProfiler:
     def profile_whole_network_performance(self, warmup_rounds=5, profiling_rounds=20):
         """整网推理性能分析，包含预热和多次循环统计"""
         self.logger.info(f"Starting whole network performance profiling...")
-        self.logger.info(f"Warmup rounds: {warmup_rounds}, Profiling rounds: {profiling_rounds}")
+        self.logger.info(
+            f"Warmup rounds: {warmup_rounds}, Profiling rounds: {profiling_rounds}"
+        )
 
         # 预热阶段
         self.logger.info("Starting warmup rounds...")
         for i in range(warmup_rounds):
             _ = self.inference_step((self.test_sparse, self.test_dense))
-            if hasattr(tf, 'musa') and tf.config.list_physical_devices('/device:MUSA:0'):
+            if hasattr(tf, "musa") and tf.config.list_physical_devices(
+                "/device:MUSA:0"
+            ):
                 tf.musa.synchronize()
             if (i + 1) % 5 == 0:
                 self.logger.info(f"Warmup round {i + 1}/{warmup_rounds} completed")
@@ -485,14 +546,18 @@ class InferenceProfiler:
 
         for i in range(profiling_rounds):
             # 确保设备同步
-            if hasattr(tf, 'musa') and tf.config.list_physical_devices('/device:MUSA:0'):
+            if hasattr(tf, "musa") and tf.config.list_physical_devices(
+                "/device:MUSA:0"
+            ):
                 tf.musa.synchronize()
 
             start_time = time.time()
             result = self.inference_step((self.test_sparse, self.test_dense))
 
             # 确保设备同步以获得准确的时间
-            if hasattr(tf, 'musa') and tf.config.list_physical_devices('/device:MUSA:0'):
+            if hasattr(tf, "musa") and tf.config.list_physical_devices(
+                "/device:MUSA:0"
+            ):
                 tf.musa.synchronize()
 
             end_time = time.time()
@@ -500,8 +565,10 @@ class InferenceProfiler:
             times.append(iteration_time)
 
             if (i + 1) % 5 == 0:
-                self.logger.info(f"Profiling round {i + 1}/{profiling_rounds} completed, "
-                                f"time: {iteration_time:.4f}s")
+                self.logger.info(
+                    f"Profiling round {i + 1}/{profiling_rounds} completed, "
+                    f"time: {iteration_time:.4f}s"
+                )
 
         # 计算统计信息
         avg_time = sum(times) / len(times)
@@ -525,17 +592,17 @@ class InferenceProfiler:
 
         # 保存性能分析结果
         perf_result = {
-            'warmup_rounds': warmup_rounds,
-            'profiling_rounds': profiling_rounds,
-            'average_time': avg_time,
-            'min_time': min_time,
-            'max_time': max_time,
-            'average_throughput': throughput_avg,
-            'max_throughput': throughput_max,
-            'min_throughput': throughput_min,
-            'std_deviation': float(np.std(times)),
-            'all_times': [float(t) for t in times],
-            'batch_size': self.batch_size
+            "warmup_rounds": warmup_rounds,
+            "profiling_rounds": profiling_rounds,
+            "average_time": avg_time,
+            "min_time": min_time,
+            "max_time": max_time,
+            "average_throughput": throughput_avg,
+            "max_throughput": throughput_max,
+            "min_throughput": throughput_min,
+            "std_deviation": float(np.std(times)),
+            "all_times": [float(t) for t in times],
+            "batch_size": self.batch_size,
         }
 
         perf_file = self.log_mgr.save_json("performance_result.json", perf_result)
@@ -551,10 +618,10 @@ class InferenceProfiler:
         layers_info = []
         for i, layer in enumerate(self.model.layers):
             layer_info = {
-                'index': i,
-                'name': layer.name,
-                'type': type(layer).__name__,
-                'trainable': layer.trainable
+                "index": i,
+                "name": layer.name,
+                "type": type(layer).__name__,
+                "trainable": layer.trainable,
             }
             layers_info.append(layer_info)
             self.logger.info(f"Layer {i}: {layer.name} ({type(layer).__name__})")
@@ -564,7 +631,9 @@ class InferenceProfiler:
         for var in self.model.trainable_variables:
             var_devices[var.name] = var.device
 
-        self.logger.info(f"Total trainable variables: {len(self.model.trainable_variables)}")
+        self.logger.info(
+            f"Total trainable variables: {len(self.model.trainable_variables)}"
+        )
         device_counts = {}
         for device in var_devices.values():
             device_counts[device] = device_counts.get(device, 0) + 1
@@ -600,18 +669,12 @@ class InferenceProfiler:
             # print(f"[debug for timo] Operator Name: {node.name}, Op: {node.op}, Device: {node.device}")  # 调试输出
 
             op_device = node.device if node.device else "unspecified"
-            op_info = {
-                'name': node.name,
-                'op': node.op,
-                'device': op_device
-            }
+            op_info = {"name": node.name, "op": node.op, "device": op_device}
 
-
-
-            if 'CPU' in op_device.upper():
+            if "CPU" in op_device.upper():
                 cpu_ops.append(op_info)
-            elif 'MUSA' in op_device.upper() or 'GPU' in op_device.upper():
-                if 'MUSA' in op_device.upper():
+            elif "MUSA" in op_device.upper() or "GPU" in op_device.upper():
+                if "MUSA" in op_device.upper():
                     musa_ops.append(op_info)
                 else:
                     gpu_ops.append(op_info)
@@ -641,28 +704,29 @@ class InferenceProfiler:
         for op in other_ops[:10]:
             self.logger.info(f"  - {op['name']} ({op['op']}) - Device: {op['device']}")
         if len(other_ops) > 10:
-            self.logger.info(f"  ... and {len(other_ops) - 10} more other device operators")
+            self.logger.info(
+                f"  ... and {len(other_ops) - 10} more other device operators"
+            )
 
         # 返回所有算子信息
-        all_ops = {
-            'cpu': cpu_ops,
-            'musa': musa_ops,
-            'gpu': gpu_ops,
-            'other': other_ops
-        }
+        all_ops = {"cpu": cpu_ops, "musa": musa_ops, "gpu": gpu_ops, "other": other_ops}
 
         return all_ops
 
     def run_inference_only(self, warmup_rounds=5, inference_rounds=20):
         """仅运行warmup和循环inference，不进行其他分析"""
         self.logger.info(f"Starting inference-only mode...")
-        self.logger.info(f"Warmup rounds: {warmup_rounds}, Inference rounds: {inference_rounds}")
+        self.logger.info(
+            f"Warmup rounds: {warmup_rounds}, Inference rounds: {inference_rounds}"
+        )
 
         # 预热阶段
         self.logger.info("Starting warmup rounds...")
         for i in range(warmup_rounds):
             _ = self.inference_step((self.test_sparse, self.test_dense))
-            if hasattr(tf, 'musa') and tf.config.list_physical_devices('/device:MUSA:0'):
+            if hasattr(tf, "musa") and tf.config.list_physical_devices(
+                "/device:MUSA:0"
+            ):
                 tf.musa.synchronize()
             if (i + 1) % 5 == 0:
                 self.logger.info(f"Warmup round {i + 1}/{warmup_rounds} completed")
@@ -673,14 +737,18 @@ class InferenceProfiler:
 
         for i in range(inference_rounds):
             # 确保设备同步
-            if hasattr(tf, 'musa') and tf.config.list_physical_devices('/device:MUSA:0'):
+            if hasattr(tf, "musa") and tf.config.list_physical_devices(
+                "/device:MUSA:0"
+            ):
                 tf.musa.synchronize()
 
             start_time = time.time()
             result = self.inference_step((self.test_sparse, self.test_dense))
 
             # 确保设备同步以获得准确的时间
-            if hasattr(tf, 'musa') and tf.config.list_physical_devices('/device:MUSA:0'):
+            if hasattr(tf, "musa") and tf.config.list_physical_devices(
+                "/device:MUSA:0"
+            ):
                 tf.musa.synchronize()
 
             end_time = time.time()
@@ -688,8 +756,10 @@ class InferenceProfiler:
             times.append(iteration_time)
 
             if (i + 1) % 5 == 0:
-                self.logger.info(f"Inference round {i + 1}/{inference_rounds} completed, "
-                                f"time: {iteration_time:.4f}s")
+                self.logger.info(
+                    f"Inference round {i + 1}/{inference_rounds} completed, "
+                    f"time: {iteration_time:.4f}s"
+                )
 
         # 计算统计信息
         avg_time = sum(times) / len(times)
@@ -713,26 +783,27 @@ class InferenceProfiler:
 
         # 保存性能分析结果
         perf_result = {
-            'warmup_rounds': warmup_rounds,
-            'inference_rounds': inference_rounds,
-            'average_time': avg_time,
-            'min_time': min_time,
-            'max_time': max_time,
-            'average_throughput': throughput_avg,
-            'max_throughput': throughput_max,
-            'min_throughput': throughput_min,
-            'std_deviation': float(np.std(times)),
-            'all_times': [float(t) for t in times],
-            'batch_size': self.batch_size
+            "warmup_rounds": warmup_rounds,
+            "inference_rounds": inference_rounds,
+            "average_time": avg_time,
+            "min_time": min_time,
+            "max_time": max_time,
+            "average_throughput": throughput_avg,
+            "max_throughput": throughput_max,
+            "min_throughput": throughput_min,
+            "std_deviation": float(np.std(times)),
+            "all_times": [float(t) for t in times],
+            "batch_size": self.batch_size,
         }
 
         perf_file = os.path.join(self.trace_dir, "inference_only_result.json")
-        with open(perf_file, 'w') as f:
+        with open(perf_file, "w") as f:
             json.dump(perf_result, f, indent=2)
 
         self.logger.info(f"Inference-only results saved to: {perf_file}")
 
         return perf_result
+
     def run_comprehensive_analysis(self):
         """运行完整的分析"""
         self.logger.info("=" * 60)
@@ -754,31 +825,33 @@ class InferenceProfiler:
         result, inference_time = self.run_inference_with_profiling()
 
         # 5. 运行整网推理性能分析
-        perf_result = self.profile_whole_network_performance(warmup_rounds=5, profiling_rounds=20)
+        perf_result = self.profile_whole_network_performance(
+            warmup_rounds=5, profiling_rounds=20
+        )
 
         # 6. 保存分析结果
         analysis_result = {
-            'timestamp': datetime.now().isoformat(),
-            'batch_size': self.batch_size,
-            'inference_time': inference_time,
-            'throughput': self.batch_size / inference_time,
-            'result_shape': result.shape.as_list(),
-            'result_dtype': str(result.dtype),
-            'layers_count': len(layers_info),
-            'trainable_variables_count': len(var_devices),
-            'device_type': device_type,
-            'available_devices': [d.name for d in tf.config.list_physical_devices()],
-            'operator_device_summary': {
-                'cpu_ops_count': len(operator_devices['cpu']),
-                'musa_ops_count': len(operator_devices['musa']),
-                'gpu_ops_count': len(operator_devices['gpu']),
-                'other_ops_count': len(operator_devices['other'])
+            "timestamp": datetime.now().isoformat(),
+            "batch_size": self.batch_size,
+            "inference_time": inference_time,
+            "throughput": self.batch_size / inference_time,
+            "result_shape": result.shape.as_list(),
+            "result_dtype": str(result.dtype),
+            "layers_count": len(layers_info),
+            "trainable_variables_count": len(var_devices),
+            "device_type": device_type,
+            "available_devices": [d.name for d in tf.config.list_physical_devices()],
+            "operator_device_summary": {
+                "cpu_ops_count": len(operator_devices["cpu"]),
+                "musa_ops_count": len(operator_devices["musa"]),
+                "gpu_ops_count": len(operator_devices["gpu"]),
+                "other_ops_count": len(operator_devices["other"]),
             },
-            'performance_profile': perf_result
+            "performance_profile": perf_result,
         }
 
         result_file = os.path.join(self.trace_dir, "analysis_result.json")
-        with open(result_file, 'w') as f:
+        with open(result_file, "w") as f:
             json.dump(analysis_result, f, indent=2)
 
         self.logger.info(f"Analysis results saved to: {result_file}")
@@ -787,6 +860,7 @@ class InferenceProfiler:
         self.logger.info("=" * 60)
 
         return analysis_result
+
 
 class AccuracyComparator:
     """CPU vs MUSA 精度对比器（Wukong 模型）"""
@@ -814,63 +888,78 @@ class AccuracyComparator:
             result = self.profiler.model(inputs, training=False)
 
         result_np = result.numpy()
-        self.logger.info(f"  {device_type} 推理完成, shape={result_np.shape}, dtype={result_np.dtype}")
+        self.logger.info(
+            f"  {device_type} 推理完成, shape={result_np.shape}, dtype={result_np.dtype}"
+        )
         return result_np
 
-    def compare_results(self, cpu_result: np.ndarray, musa_result: np.ndarray,
-                        rtol: float = 1e-5, atol: float = 1e-6) -> Dict[str, Any]:
+    def compare_results(
+        self,
+        cpu_result: np.ndarray,
+        musa_result: np.ndarray,
+        rtol: float = 1e-5,
+        atol: float = 1e-6,
+    ) -> Dict[str, Any]:
         """比较 CPU 和 MUSA 的推理结果"""
         report = {
-            'cpu_shape': list(cpu_result.shape),
-            'musa_shape': list(musa_result.shape),
-            'cpu_dtype': str(cpu_result.dtype),
-            'musa_dtype': str(musa_result.dtype),
-            'rtol': rtol,
-            'atol': atol,
+            "cpu_shape": list(cpu_result.shape),
+            "musa_shape": list(musa_result.shape),
+            "cpu_dtype": str(cpu_result.dtype),
+            "musa_dtype": str(musa_result.dtype),
+            "rtol": rtol,
+            "atol": atol,
         }
 
         if cpu_result.shape != musa_result.shape:
-            report['shape_match'] = False
-            report['passed'] = False
-            report['error'] = f"Shape 不匹配: CPU={cpu_result.shape}, MUSA={musa_result.shape}"
+            report["shape_match"] = False
+            report["passed"] = False
+            report[
+                "error"
+            ] = f"Shape 不匹配: CPU={cpu_result.shape}, MUSA={musa_result.shape}"
             return report
-        report['shape_match'] = True
+        report["shape_match"] = True
 
         cpu_f64 = cpu_result.astype(np.float64)
         musa_f64 = musa_result.astype(np.float64)
 
         # 绝对误差
         abs_diff = np.abs(cpu_f64 - musa_f64)
-        report['max_abs_diff'] = float(np.max(abs_diff))
-        report['mean_abs_diff'] = float(np.mean(abs_diff))
-        report['median_abs_diff'] = float(np.median(abs_diff))
+        report["max_abs_diff"] = float(np.max(abs_diff))
+        report["mean_abs_diff"] = float(np.mean(abs_diff))
+        report["median_abs_diff"] = float(np.median(abs_diff))
 
         # 相对误差
         denom = np.maximum(np.abs(cpu_f64), 1e-12)
         rel_diff = abs_diff / denom
-        report['max_rel_diff'] = float(np.max(rel_diff))
-        report['mean_rel_diff'] = float(np.mean(rel_diff))
-        report['median_rel_diff'] = float(np.median(rel_diff))
+        report["max_rel_diff"] = float(np.max(rel_diff))
+        report["mean_rel_diff"] = float(np.mean(rel_diff))
+        report["median_rel_diff"] = float(np.median(rel_diff))
 
         # allclose
-        report['allclose'] = bool(np.allclose(cpu_f64, musa_f64, rtol=rtol, atol=atol))
+        report["allclose"] = bool(np.allclose(cpu_f64, musa_f64, rtol=rtol, atol=atol))
 
         # 不匹配元素
         mismatch_mask = ~np.isclose(cpu_f64, musa_f64, rtol=rtol, atol=atol)
         num_mismatch = int(np.sum(mismatch_mask))
         total_elements = int(cpu_f64.size)
-        report['num_mismatch'] = num_mismatch
-        report['total_elements'] = total_elements
-        report['mismatch_ratio'] = num_mismatch / total_elements if total_elements > 0 else 0.0
+        report["num_mismatch"] = num_mismatch
+        report["total_elements"] = total_elements
+        report["mismatch_ratio"] = (
+            num_mismatch / total_elements if total_elements > 0 else 0.0
+        )
 
         # 数值统计
-        report['cpu_stats'] = {
-            'min': float(np.min(cpu_f64)), 'max': float(np.max(cpu_f64)),
-            'mean': float(np.mean(cpu_f64)), 'std': float(np.std(cpu_f64)),
+        report["cpu_stats"] = {
+            "min": float(np.min(cpu_f64)),
+            "max": float(np.max(cpu_f64)),
+            "mean": float(np.mean(cpu_f64)),
+            "std": float(np.std(cpu_f64)),
         }
-        report['musa_stats'] = {
-            'min': float(np.min(musa_f64)), 'max': float(np.max(musa_f64)),
-            'mean': float(np.mean(musa_f64)), 'std': float(np.std(musa_f64)),
+        report["musa_stats"] = {
+            "min": float(np.min(musa_f64)),
+            "max": float(np.max(musa_f64)),
+            "mean": float(np.mean(musa_f64)),
+            "std": float(np.std(musa_f64)),
         }
 
         # 余弦相似度
@@ -879,18 +968,24 @@ class AccuracyComparator:
         norm_cpu = np.linalg.norm(cpu_flat)
         norm_musa = np.linalg.norm(musa_flat)
         if norm_cpu > 0 and norm_musa > 0:
-            report['cosine_similarity'] = float(np.dot(cpu_flat, musa_flat) / (norm_cpu * norm_musa))
+            report["cosine_similarity"] = float(
+                np.dot(cpu_flat, musa_flat) / (norm_cpu * norm_musa)
+            )
         else:
-            report['cosine_similarity'] = 1.0 if np.allclose(cpu_flat, musa_flat) else 0.0
+            report["cosine_similarity"] = (
+                1.0 if np.allclose(cpu_flat, musa_flat) else 0.0
+            )
 
         # 分档通过率
         thresholds = [1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2]
-        report['threshold_pass_rates'] = {}
+        report["threshold_pass_rates"] = {}
         for t in thresholds:
             pass_count = int(np.sum(np.isclose(cpu_f64, musa_f64, rtol=t, atol=t)))
-            report['threshold_pass_rates'][str(t)] = pass_count / total_elements if total_elements > 0 else 1.0
+            report["threshold_pass_rates"][str(t)] = (
+                pass_count / total_elements if total_elements > 0 else 1.0
+            )
 
-        report['passed'] = report['allclose']
+        report["passed"] = report["allclose"]
         return report
 
     def print_report(self, report: Dict[str, Any]) -> None:
@@ -900,13 +995,17 @@ class AccuracyComparator:
         self.logger.info("  CPU vs MUSA 精度对比报告")
         self.logger.info("=" * 80)
 
-        passed_str = "✅ PASSED" if report.get('passed') else "❌ FAILED"
+        passed_str = "✅ PASSED" if report.get("passed") else "❌ FAILED"
         self.logger.info(f"  结果: {passed_str}")
-        self.logger.info(f"  CPU  Shape: {report['cpu_shape']}, Dtype: {report['cpu_dtype']}")
-        self.logger.info(f"  MUSA Shape: {report['musa_shape']}, Dtype: {report['musa_dtype']}")
+        self.logger.info(
+            f"  CPU  Shape: {report['cpu_shape']}, Dtype: {report['cpu_dtype']}"
+        )
+        self.logger.info(
+            f"  MUSA Shape: {report['musa_shape']}, Dtype: {report['musa_dtype']}"
+        )
         self.logger.info(f"  容差: rtol={report['rtol']}, atol={report['atol']}")
 
-        if not report.get('shape_match'):
+        if not report.get("shape_match"):
             self.logger.error(f"  错误: {report.get('error')}")
             return
 
@@ -920,7 +1019,9 @@ class AccuracyComparator:
         self.logger.info(f"  {'平均相对误差':<20} {report['mean_rel_diff']:>15.2e}")
         self.logger.info(f"  {'余弦相似度':<20} {report['cosine_similarity']:>15.10f}")
         self.logger.info(f"  {'np.allclose':<20} {str(report['allclose']):>15}")
-        self.logger.info(f"  {'不匹配元素':<20} {report['num_mismatch']:>10} / {report['total_elements']}")
+        self.logger.info(
+            f"  {'不匹配元素':<20} {report['num_mismatch']:>10} / {report['total_elements']}"
+        )
         self.logger.info(f"  {'不匹配比例':<20} {report['mismatch_ratio']:>15.6%}")
 
         # self.logger.info("")
@@ -932,16 +1033,19 @@ class AccuracyComparator:
         self.logger.info("  数值分布对比:")
         self.logger.info(f"  {'统计量':<8} {'CPU':>14} {'MUSA':>14} {'差异':>14}")
         self.logger.info(f"  {'-'*52}")
-        for key in ['min', 'max', 'mean', 'std']:
-            cpu_val = report['cpu_stats'][key]
-            musa_val = report['musa_stats'][key]
+        for key in ["min", "max", "mean", "std"]:
+            cpu_val = report["cpu_stats"][key]
+            musa_val = report["musa_stats"][key]
             diff = abs(cpu_val - musa_val)
-            self.logger.info(f"  {key:<8} {cpu_val:>14.6f} {musa_val:>14.6f} {diff:>14.2e}")
+            self.logger.info(
+                f"  {key:<8} {cpu_val:>14.6f} {musa_val:>14.6f} {diff:>14.2e}"
+            )
 
         self.logger.info("=" * 80)
 
-    def run_comparison(self, rtol: float = 1e-5, atol: float = 1e-6,
-                       warmup_rounds: int = 2) -> Dict[str, Any]:
+    def run_comparison(
+        self, rtol: float = 1e-5, atol: float = 1e-6, warmup_rounds: int = 2
+    ) -> Dict[str, Any]:
         """执行完整的 CPU vs MUSA 精度对比"""
         self.logger.info("=" * 80)
         self.logger.info("  CPU vs MUSA 精度对比验证 (Wukong Model)")
@@ -952,16 +1056,18 @@ class AccuracyComparator:
         except Exception as e:
             self.logger.error(f"CPU 推理失败: {e}")
             import traceback
+
             traceback.print_exc()
-            return {'passed': False, 'error': f'CPU inference failed: {e}'}
+            return {"passed": False, "error": f"CPU inference failed: {e}"}
 
         try:
             musa_result = self.run_on_device("MUSA", warmup_rounds)
         except Exception as e:
             self.logger.error(f"MUSA 推理失败: {e}")
             import traceback
+
             traceback.print_exc()
-            return {'passed': False, 'error': f'MUSA inference failed: {e}'}
+            return {"passed": False, "error": f"MUSA inference failed: {e}"}
 
         report = self.compare_results(cpu_result, musa_result, rtol=rtol, atol=atol)
         self.print_report(report)
@@ -969,11 +1075,12 @@ class AccuracyComparator:
         # 保存报告
         timestamp = datetime.now().strftime("%Y-%m-%d-%H.%M.%S")
         filepath = os.path.join(self.trace_dir, f"accuracy_comparison_{timestamp}.json")
-        with open(filepath, 'w') as f:
+        with open(filepath, "w") as f:
             json.dump(report, f, indent=2)
         self.logger.info(f"  精度对比报告已保存到: {filepath}")
 
         return report
+
 
 def main():
     """主函数"""
@@ -985,10 +1092,9 @@ def main():
     log_mgr = get_log_manager("wukong_inference")
     logger = log_mgr.get_logger("main")
 
-
     # 解析命令行参数
     parser = argparse.ArgumentParser(
-        description='Wukong Model TensorFlow Inference Script - Support CPU/MUSA device comparison',
+        description="Wukong Model TensorFlow Inference Script - Support CPU/MUSA device comparison",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法:
@@ -1008,43 +1114,78 @@ def main():
   # 手动指定 Docker 中的绝对路径
   python run_wukong_tf_musa.py --device musa \
     --musa-plugin /workspace/tensorflow_musa_extension/build/libmusa_plugin.so
-        """
+        """,
     )
-    parser.add_argument('--inference-only', action='store_true',
-                        help='Run only warmup and inference cycles without other analysis')
-    parser.add_argument('--profile-ops', action='store_true',
-                        help='Profile individual operator execution times')
-    parser.add_argument('--compare-accuracy', action='store_true',
-                        help='运行 CPU vs MUSA 精度对比验证')
-    parser.add_argument('--rtol', type=float, default=1e-2,
-                        help='精度对比的相对容差 (default: 1e-2)')
-    parser.add_argument('--atol', type=float, default=1e-2,
-                        help='精度对比的绝对容差 (default: 1e-2)')
-    parser.add_argument('--batch-size', type=int, default=1024,
-                        help='Batch size for inference (default: 1024)')
-    parser.add_argument('--warmup-rounds', type=int, default=5,
-                        help='Number of warmup rounds (default: 5)')
-    parser.add_argument('--inference-rounds', type=int, default=20,
-                        help='Number of inference rounds (default: 20)')
-    parser.add_argument('--device', type=str, choices=['cpu', 'musa'], default='musa',
-                        help='Device to run inference: cpu or musa (default: musa)')
-    parser.add_argument('--musa-plugin', type=str, default=get_default_musa_plugin_path(),
-                        help='Path to MUSA plugin library. You can pass either a relative '
-                             'sibling-workspace path or an absolute docker path; when omitted, '
-                             'the script auto-detects one.')
-    parser.add_argument('--log-device-placement', action='store_true',
-                        help='Log device placement for each operation (default: False)')
+    parser.add_argument(
+        "--inference-only",
+        action="store_true",
+        help="Run only warmup and inference cycles without other analysis",
+    )
+    parser.add_argument(
+        "--profile-ops",
+        action="store_true",
+        help="Profile individual operator execution times",
+    )
+    parser.add_argument(
+        "--compare-accuracy", action="store_true", help="运行 CPU vs MUSA 精度对比验证"
+    )
+    parser.add_argument(
+        "--rtol", type=float, default=1e-2, help="精度对比的相对容差 (default: 1e-2)"
+    )
+    parser.add_argument(
+        "--atol", type=float, default=1e-2, help="精度对比的绝对容差 (default: 1e-2)"
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1024,
+        help="Batch size for inference (default: 1024)",
+    )
+    parser.add_argument(
+        "--warmup-rounds",
+        type=int,
+        default=5,
+        help="Number of warmup rounds (default: 5)",
+    )
+    parser.add_argument(
+        "--inference-rounds",
+        type=int,
+        default=20,
+        help="Number of inference rounds (default: 20)",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        choices=["cpu", "musa"],
+        default="musa",
+        help="Device to run inference: cpu or musa (default: musa)",
+    )
+    parser.add_argument(
+        "--musa-plugin",
+        type=str,
+        default=get_default_musa_plugin_path(),
+        help="Path to MUSA plugin library. You can pass either a relative "
+        "sibling-workspace path or an absolute docker path; when omitted, "
+        "the script auto-detects one.",
+    )
+    parser.add_argument(
+        "--log-device-placement",
+        action="store_true",
+        help="Log device placement for each operation (default: False)",
+    )
 
     args = parser.parse_args()
     args.musa_plugin = resolve_musa_plugin_path(args.musa_plugin)
     logger.info(f"Resolved MUSA plugin path: {args.musa_plugin}")
 
     # 加载 MUSA 插件（仅在 device=musa 时需要）
-    if args.device == 'musa' or args.compare_accuracy:
+    if args.device == "musa" or args.compare_accuracy:
         if os.path.exists(args.musa_plugin):
             try:
                 tf.load_library(args.musa_plugin)
-                logger.info(f">>>> [MUSA] Plugin loaded successfully from: {args.musa_plugin}")
+                logger.info(
+                    f">>>> [MUSA] Plugin loaded successfully from: {args.musa_plugin}"
+                )
             except Exception as e:
                 logger.error(f"!!!! [MUSA] Failed to load plugin: {e}")
                 if args.compare_accuracy:
@@ -1075,12 +1216,10 @@ def main():
 
         comparator = AccuracyComparator(profiler)
         report = comparator.run_comparison(
-            rtol=args.rtol,
-            atol=args.atol,
-            warmup_rounds=args.warmup_rounds
+            rtol=args.rtol, atol=args.atol, warmup_rounds=args.warmup_rounds
         )
 
-        if report.get('passed'):
+        if report.get("passed"):
             logger.info("\n🎉 精度对比通过！CPU 与 MUSA 结果一致。")
         else:
             logger.warning("\n⚠️  精度对比未通过，请检查报告中的详细信息。")
@@ -1095,25 +1234,32 @@ def main():
         # 仅运行 warmup 和 inference
         if args.profile_ops:
             # Run operator profiling
-            result, inference_time = profiler.profile_operator_times((profiler.test_sparse, profiler.test_dense))
+            result, inference_time = profiler.profile_operator_times(
+                (profiler.test_sparse, profiler.test_dense)
+            )
 
             logger.info(f"\nOperator profiling completed successfully!")
             logger.info(f"Total inference time: {inference_time:.6f} seconds")
-            logger.info(f"Throughput: {profiler.batch_size / inference_time:.2f} samples/second")
+            logger.info(
+                f"Throughput: {profiler.batch_size / inference_time:.2f} samples/second"
+            )
             logger.info(f"Results saved in: {profiler.trace_dir}")
 
             # Print operator timing results
             profiler.print_operator_timings()
         else:
             result = profiler.run_inference_only(
-                warmup_rounds=args.warmup_rounds,
-                inference_rounds=args.inference_rounds
+                warmup_rounds=args.warmup_rounds, inference_rounds=args.inference_rounds
             )
 
             logger.info(f"\nInference-only mode completed successfully!")
             logger.info(f"Average inference time: {result['average_time']:.6f} seconds")
-            logger.info(f"Average throughput: {result['average_throughput']:.2f} samples/second")
-            logger.info(f"Min/Max throughput: {result['min_throughput']:.2f}/{result['max_throughput']:.2f} samples/second")
+            logger.info(
+                f"Average throughput: {result['average_throughput']:.2f} samples/second"
+            )
+            logger.info(
+                f"Min/Max throughput: {result['min_throughput']:.2f}/{result['max_throughput']:.2f} samples/second"
+            )
             logger.info(f"Results saved in: {profiler.trace_dir}")
     else:
         if args.profile_ops:
@@ -1121,14 +1267,18 @@ def main():
             logger.info("Running comprehensive analysis with operator profiling...")
 
             # Run operator profiling
-            result, inference_time = profiler.profile_operator_times((profiler.test_sparse, profiler.test_dense))
+            result, inference_time = profiler.profile_operator_times(
+                (profiler.test_sparse, profiler.test_dense)
+            )
 
             # Print operator timing results
             profiler.print_operator_timings()
 
             logger.info(f"\nOperator profiling completed successfully!")
             logger.info(f"Total inference time: {inference_time:.6f} seconds")
-            logger.info(f"Throughput: {profiler.batch_size / inference_time:.2f} samples/second")
+            logger.info(
+                f"Throughput: {profiler.batch_size / inference_time:.2f} samples/second"
+            )
             logger.info(f"Results saved in: {profiler.trace_dir}")
         else:
             # 运行完整分析
@@ -1140,7 +1290,7 @@ def main():
             logger.info(f"Device used: {result['device_type']}")
 
             # 打印算子设备分布摘要
-            op_summary = result['operator_device_summary']
+            op_summary = result["operator_device_summary"]
             logger.info(f"Operator distribution:")
             logger.info(f"  CPU ops: {op_summary['cpu_ops_count']}")
             logger.info(f"  MUSA ops: {op_summary['musa_ops_count']}")
@@ -1148,11 +1298,17 @@ def main():
             logger.info(f"  Other ops: {op_summary['other_ops_count']}")
 
             # 打印性能分析摘要
-            perf_summary = result['performance_profile']
+            perf_summary = result["performance_profile"]
             logger.info(f"Performance profiling results:")
-            logger.info(f"  Average inference time: {perf_summary['average_time']:.6f} seconds")
-            logger.info(f"  Average throughput: {perf_summary['average_throughput']:.2f} samples/second")
-            logger.info(f"  Min/Max throughput: {perf_summary['min_throughput']:.2f}/{perf_summary['max_throughput']:.2f} samples/second")
+            logger.info(
+                f"  Average inference time: {perf_summary['average_time']:.6f} seconds"
+            )
+            logger.info(
+                f"  Average throughput: {perf_summary['average_throughput']:.2f} samples/second"
+            )
+            logger.info(
+                f"  Min/Max throughput: {perf_summary['min_throughput']:.2f}/{perf_summary['max_throughput']:.2f} samples/second"
+            )
 
             logger.info(f"Trace files are saved in: {profiler.trace_dir}")
 

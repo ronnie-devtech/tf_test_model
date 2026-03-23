@@ -25,8 +25,8 @@ tf.load_library(plugin_path)
 
 import numpy as np
 
-from model.tensorflow.rankmixer import RankMixer
-from model.tensorflow.lr_schedule import LinearWarmup
+from model.rankmixer import RankMixer
+from model.lr_schedule import LinearWarmup
 
 # Example sibling-workspace path (preferred):
 #   ../tensorflow_musa_extension/build/libmusa_plugin.so
@@ -53,7 +53,7 @@ DIM_OUTPUT = 1
 ####################################################################################################
 #                                   MODEL SPECIFIC CONFIGURATION                                   #
 ####################################################################################################
-NUM_LAYERS = 6  # number of Wukong layers
+NUM_LAYERS = 6  # number of layers
 DIM_EMB = 128  # dimension of embeddings
 NUM_TOKENS = 16  # number of tokens after semantic tokenization (T in the paper)
 NUM_HEADS = (

@@ -2,8 +2,8 @@ import tensorflow as tf
 from tensorflow.keras import layers, Model
 from typing import List
 
-from model.tensorflow.embedding import Embedding
-from model.tensorflow.mlp import MLP
+from model.embedding import Embedding
+from model.mlp import MLP
 
 
 class CIN(layers.Layer):

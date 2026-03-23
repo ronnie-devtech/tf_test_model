@@ -91,12 +91,12 @@ standard_model/
 :---:|:---:|
 wukong|✅
 rankmixer|✅
-onetrans|✅
 tokenmixer-large|✅
 fwfm|✅
 xdeepfm|✅
 dsin|✅
-fgcnn|❌
+fgcnn|✅
+onetrans|❌
 dien|❌
 
 ## 通用命令行参数
