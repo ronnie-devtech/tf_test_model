@@ -2,8 +2,8 @@ import tensorflow as tf
 from tensorflow.keras import layers, Model
 from typing import List
 
-from model.tensorflow.embedding import Embedding
-from model.tensorflow.mlp import MLP
+from model.embedding import Embedding
+from model.mlp import MLP
 
 
 class LinearCompressBlock(layers.Layer):
@@ -274,3 +274,29 @@ class Wukong(Model):
 
         final_shape = [None, (self.num_emb_lcb + self.num_emb_fmb) * self.dim_emb]
         self.projection_head.build(final_shape)
+
+
+if __name__ == "__main__":
+    # Example usage
+    model = Wukong(
+        num_layers=2,
+        num_sparse_embs=[20, 20],
+        dim_emb=16,
+        dim_input_sparse=2,
+        dim_input_dense=3,
+        num_emb_lcb=4,
+        num_emb_fmb=4,
+        rank_fmb=2,
+        num_hidden_wukong=8,
+        dim_hidden_wukong=32,
+        num_hidden_head=8,
+        dim_hidden_head=32,
+        dim_output=1,
+        dropout=0.1,
+        bias=True,
+    )
+
+    sparse_inputs = tf.constant([[1, 2], [3, 4]], dtype=tf.int32)
+    dense_inputs = tf.constant([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=tf.float32)
+    outputs = model((sparse_inputs, dense_inputs))
+    print("Output shape:", outputs.shape)  # Should print (2, 1)

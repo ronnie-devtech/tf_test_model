@@ -25,8 +25,7 @@ tf.load_library(plugin_path)
 
 import numpy as np
 
-from model.dsin import DSIN
-from model.lr_schedule import LinearWarmup
+from model.deepfm import DeepFM
 
 # Example sibling-workspace path (preferred):
 #   ../tensorflow_musa_extension/build/libmusa_plugin.so
@@ -53,52 +52,48 @@ DIM_OUTPUT = 1
 ####################################################################################################
 #                                   MODEL SPECIFIC CONFIGURATION                                   #
 ####################################################################################################
-DIM_EMB = 128
-SESS_NUM = 3
-SESS_LEN = 13
-HEAD_NUM = 8
-DNN_HIDDEN_UNITS = [256, 64]
-BIAS = False
-GRAD_MAX_NORM = 1.0
+DIM_EMB = 10
+DNN_HIDDEN_UNITS = (400, 400, 400)
+L2_REG_LINEAR = 1e-5
+L2_REG_EMBEDDING = 1e-5
+L2_REG_DNN = 0.0
+DROPOUT = 0.5
+USE_BIAS = True
 
 ####################################################################################################
 #                                           CREATE MODEL                                           #
 ####################################################################################################
-model = DSIN(
+model = DeepFM(
     num_sparse_embs=NUM_SPARSE_EMBS,
+    dim_emb=DIM_EMB,
+    dim_input_sparse=NUM_CAT_FEATURES,
     dim_input_dense=NUM_DENSE_FEATURES,
-    dim=DIM_EMB,
-    sess_num=SESS_NUM,
-    sess_len=SESS_LEN,
     dnn_hidden_units=DNN_HIDDEN_UNITS,
-    head_num=HEAD_NUM,
-    bias=BIAS,
+    l2_reg_linear=L2_REG_LINEAR,
+    l2_reg_embedding=L2_REG_EMBEDDING,
+    l2_reg_dnn=L2_REG_DNN,
+    dropout=DROPOUT,
+    use_bias=USE_BIAS,
+    dim_output=DIM_OUTPUT,
 )
 
 ####################################################################################################
 #                                  TRAINING SPECIFIC CONFIGURATION                                 #
 ####################################################################################################
-BATCH_SIZE = 2
 TRAIN_EPOCHS = 10
-PEAK_LR = 0.004
-INIT_LR = 1e-8
-TOTAL_STEPS_PER_EPOCH = 39291958 // BATCH_SIZE
-TOTAL_ITERS = TOTAL_STEPS_PER_EPOCH
+LEARNING_RATE = 0.001
 
-lr_schedule = LinearWarmup(
-    initial_learning_rate=INIT_LR, peak_learning_rate=PEAK_LR, warmup_steps=TOTAL_ITERS
-)
-embedding_optimizer = tf.keras.optimizers.SGD(learning_rate=lr_schedule)
-other_optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
-criterion = tf.keras.losses.BinaryCrossentropy(from_logits=False)
+optimizer = tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE)
+criterion = tf.keras.losses.BinaryCrossentropy(from_logits=True)
 
 ####################################################################################################
 #                                    BUILD MODEL & SEPARATE VARS                                   #
 ####################################################################################################
 # TF Lazy Execution
-dummy_sparse = tf.zeros((1, NUM_CAT_FEATURES), dtype=tf.int32)
+dummy_static_sparse = tf.zeros((1, NUM_CAT_FEATURES), dtype=tf.int32)
 dummy_dense = tf.zeros((1, NUM_DENSE_FEATURES), dtype=tf.float32)
-_ = model((dummy_sparse, dummy_dense))
+dummy_inputs = (dummy_static_sparse, dummy_dense)
+_ = model(dummy_inputs, training=False)
 
 embedding_parameters = []
 other_parameters = []
@@ -156,27 +151,11 @@ def train_step(inputs, labels):
     with tf.GradientTape() as tape:
         outputs = model(inputs, training=True)
         loss = criterion(labels, tf.squeeze(outputs))
-
+        if model.losses:
+            loss += tf.add_n(model.losses)
+    # Compute gradients and update parameters
     grads = tape.gradient(loss, model.trainable_variables)
-    emb_grads = []
-    other_grads = []
-
-    for grad, var in zip(grads, model.trainable_variables):
-        if grad is not None:
-            if hasattr(var, "path"):
-                # path is available in TF 2.13+
-                if "sparse_embedding" in var.path and "embeddings" in var.name:
-                    emb_grads.append((grad, var))
-                else:
-                    other_grads.append((grad, var))
-            else:
-                if "sparse_embedding" in var.name:
-                    emb_grads.append((grad, var))
-                else:
-                    other_grads.append((grad, var))
-    embedding_optimizer.apply_gradients(emb_grads)
-    other_optimizer.apply_gradients(other_grads)
-
+    optimizer.apply_gradients(zip(grads, model.trainable_variables))
     return loss
 
 
@@ -288,6 +267,7 @@ inputs = (
 )
 
 labels = tf.convert_to_tensor(np.array([1, 0], dtype=np.float32))
+
 
 try:
     _ = train_step(inputs, labels)

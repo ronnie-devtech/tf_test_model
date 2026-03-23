@@ -21,12 +21,12 @@ plugin_path = resolve_musa_plugin_path(args.tensorflow_musa_library_path)
 
 import tensorflow as tf
 
-# tf.load_library(plugin_path)
+tf.load_library(plugin_path)
 
 import numpy as np
 
-from model.tensorflow.dien import DIEN
-from model.tensorflow.lr_schedule import LinearWarmup
+from model.dien import DIEN
+from model.lr_schedule import LinearWarmup
 
 # Example sibling-workspace path (preferred):
 #   ../tensorflow_musa_extension/build/libmusa_plugin.so
@@ -62,9 +62,6 @@ DIM_EMB = 32
 EXTRACTOR_HIDDEN_DIM = 32
 EVOLUTION_HIDDEN_DIM = 32
 GRU_TYPE = "AUGRU"
-ATT_HIDDEN_UNITS = (64, 16)
-ATT_ACTIVATION = "dice"
-ATT_WEIGHT_NORMALIZATION = False
 NUM_HIDDEN_HEAD = 2
 DIM_HIDDEN_HEAD = 64
 DROPOUT = 0.3
@@ -86,9 +83,6 @@ model = DIEN(
     dim_hidden_head=DIM_HIDDEN_HEAD,
     use_auxiliary_loss=USE_AUXILIARY_LOSS,
     gru_type=GRU_TYPE,
-    att_hidden_units=ATT_HIDDEN_UNITS,
-    att_activation=ATT_ACTIVATION,
-    att_weight_normalization=ATT_WEIGHT_NORMALIZATION,
     dim_output=DIM_OUTPUT,
     dropout=DROPOUT,
     bias=BIAS,

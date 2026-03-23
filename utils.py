@@ -201,7 +201,9 @@ class LogManager:
     # 核心 API
     # --------------------------------------------------
 
-    def get_logger(self, component: str = "main", log_file: Optional[str] = None) -> logging.Logger:
+    def get_logger(
+        self, component: str = "main", log_file: Optional[str] = None
+    ) -> logging.Logger:
         """获取一个已配置好的 logger
 
         同一 (model_name, component) 组合只会创建一次 logger，
@@ -246,7 +248,9 @@ class LogManager:
         self._loggers[logger_name] = logger
         return logger
 
-    def save_json(self, filename: str, data: Dict[str, Any], sub_dir: Optional[str] = None) -> str:
+    def save_json(
+        self, filename: str, data: Dict[str, Any], sub_dir: Optional[str] = None
+    ) -> str:
         """将字典数据保存为 JSON 文件到 trace 目录
 
         Args:
@@ -314,6 +318,7 @@ class LogManager:
 # ==========================================
 # 模块级工厂函数（推荐使用入口）
 # ==========================================
+
 
 def get_log_manager(
     model_name: str,

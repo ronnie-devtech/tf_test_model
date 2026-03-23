@@ -25,8 +25,8 @@ tf.load_library(plugin_path)
 
 import numpy as np
 
-from model.tensorflow.fgcnn import FGCNN
-from model.tensorflow.lr_schedule import LinearWarmup
+from model.fgcnn import FGCNN
+from model.lr_schedule import LinearWarmup
 
 # Example sibling-workspace path (preferred):
 #   ../tensorflow_musa_extension/build/libmusa_plugin.so
@@ -53,26 +53,15 @@ DIM_OUTPUT = 1
 ####################################################################################################
 #                                   MODEL SPECIFIC CONFIGURATION                                   #
 ####################################################################################################
-NUM_LAYERS = 2  # number of Wukong layers
 DIM_EMB = 128  # dimension of embeddings
-NUM_HIDDEN_HEAD = 2  # number of hidden layers in the final prediction head MLPs
-DIM_HIDDEN_HEAD = 256  # dimension of hidden layers in the final prediction head
-DROPOUT = 0.5  # dropout rate
-BIAS = False  # whether to use bias terms in the model
 
 ####################################################################################################
 #                                           CREATE MODEL                                           #
 ####################################################################################################
 model = FGCNN(
-    num_layers=NUM_LAYERS,
     num_sparse_embs=NUM_SPARSE_EMBS,
     dim_input_dense=NUM_DENSE_FEATURES,
     dim_emb=DIM_EMB,
-    num_hidden_head=NUM_HIDDEN_HEAD,
-    dim_hidden_head=DIM_HIDDEN_HEAD,
-    dim_output=1,
-    dropout=DROPOUT,
-    bias=BIAS,
 )
 
 ####################################################################################################
