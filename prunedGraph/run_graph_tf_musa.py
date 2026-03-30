@@ -22,6 +22,7 @@ import os
 import sys
 import json
 import time
+import functools
 import logging
 import argparse
 from datetime import datetime
@@ -52,6 +53,7 @@ except ImportError as e:
 
 # 禁用 V2 行为，确保 TF1 图能正常运行
 import tensorflow.compat.v1 as tf
+from tensorflow.python.client import device_lib
 
 tf.disable_eager_execution()
 
@@ -88,6 +90,174 @@ def create_session_config(
             logger.info("Enabled custom optimizer: musa_graph_optimizer")
 
     return config
+
+
+def get_tf_execution_device_name(device_type: str) -> str:
+    """Return the TensorFlow device path used in tf.device(...)."""
+    device_type_upper = (device_type or "CPU").upper()
+    if device_type_upper == "MUSA":
+        return "/device:MUSA:0"
+    if device_type_upper == "CUDA":
+        return "/GPU:0"
+    return "/device:CPU:0"
+
+
+def get_visible_runtime_device_name(device_type: str) -> str:
+    """Return the user-facing runtime device after visible-device mapping."""
+    device_type_upper = (device_type or "CPU").upper()
+    if device_type_upper == "CPU":
+        return "/device:CPU:0"
+
+    env_var_names = []
+    if device_type_upper == "MUSA":
+        env_var_names = ["MTHREADS_VISIBLE_DEVICES", "MUSA_VISIBLE_DEVICES"]
+    elif device_type_upper == "CUDA":
+        env_var_names = ["CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"]
+
+    for env_name in env_var_names:
+        env_value = os.environ.get(env_name)
+        if not env_value:
+            continue
+        visible_ids = [item.strip() for item in env_value.split(",") if item.strip()]
+        if not visible_ids:
+            continue
+        if device_type_upper == "CUDA":
+            return f"/GPU:{visible_ids[0]}"
+        return f"/device:{device_type_upper}:{visible_ids[0]}"
+
+    return get_tf_execution_device_name(device_type_upper)
+
+
+@functools.lru_cache(maxsize=8)
+def get_runtime_device_info(device_type: str) -> Dict[str, Any]:
+    """Collect device mapping info for logging."""
+    device_type_upper = (device_type or "CPU").upper()
+    execution_device = get_tf_execution_device_name(device_type_upper)
+    runtime_device = get_visible_runtime_device_name(device_type_upper)
+
+    env_var_names = []
+    if device_type_upper == "MUSA":
+        env_var_names = ["MTHREADS_VISIBLE_DEVICES", "MUSA_VISIBLE_DEVICES"]
+    elif device_type_upper == "CUDA":
+        env_var_names = ["CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"]
+
+    env_values = {}
+    visible_ids = []
+    for env_name in env_var_names:
+        env_value = os.environ.get(env_name)
+        if env_value:
+            env_values[env_name] = env_value
+            if not visible_ids:
+                visible_ids = [item.strip() for item in env_value.split(",") if item.strip()]
+
+    tf_physical_type = "GPU" if device_type_upper == "CUDA" else device_type_upper
+    try:
+        physical_devices = [dev.name for dev in tf.config.list_physical_devices(tf_physical_type)]
+    except Exception:
+        physical_devices = []
+
+    local_devices = []
+    try:
+        for dev in device_lib.list_local_devices():
+            if device_type_upper == "CPU" and dev.device_type != "CPU":
+                continue
+            if device_type_upper == "CUDA" and dev.device_type != "GPU":
+                continue
+            if device_type_upper == "MUSA" and dev.device_type not in ("MUSA", "GPU"):
+                continue
+
+            desc = dev.physical_device_desc.strip() if dev.physical_device_desc else ""
+            summary = f"{dev.name} [{dev.device_type}]"
+            if desc:
+                summary = f"{summary} {desc}"
+            local_devices.append(summary)
+    except Exception:
+        local_devices = []
+
+    physical_target = None
+    if visible_ids and device_type_upper in ("MUSA", "CUDA"):
+        physical_target = f"{device_type_upper}:{visible_ids[0]}"
+
+    return {
+        "device_type": device_type_upper,
+        "execution_device": execution_device,
+        "runtime_device": runtime_device,
+        "env_values": env_values,
+        "physical_target": physical_target,
+        "physical_devices": physical_devices,
+        "local_devices": local_devices,
+    }
+
+
+def format_runtime_device_label(device_type: str) -> str:
+    """Build a concise device label for user-facing logs."""
+    info = get_runtime_device_info(device_type)
+    return f"{info['device_type']} [{info['runtime_device']}]"
+
+
+@functools.lru_cache(maxsize=32)
+def format_profile_device_name(device_name: str, device_type: str) -> str:
+    """Format profiler-reported device names with runtime mapping when possible."""
+    if not device_name:
+        return device_name
+
+    device_short = device_name.split("/")[-1] if "/" in device_name else device_name
+    info = get_runtime_device_info(device_type)
+    runtime_short = (
+        info["runtime_device"].split("/")[-1]
+        if "/" in info["runtime_device"]
+        else info["runtime_device"]
+    )
+    exec_short = (
+        info["execution_device"].split("/")[-1]
+        if "/" in info["execution_device"]
+        else info["execution_device"]
+    )
+
+    if device_short == exec_short and runtime_short != exec_short:
+        return runtime_short
+    return device_short
+
+
+def log_runtime_device_info(
+    logger: logging.Logger, device_type: str, prefix: str = ""
+) -> None:
+    """Log how logical devices map to visible runtime devices."""
+    info = get_runtime_device_info(device_type)
+
+    logger.info("%sRequested device type: %s", prefix, info["device_type"])
+    logger.info("%sRuntime target device: %s", prefix, info["runtime_device"])
+    logger.info("%sTensorFlow execution target: %s", prefix, info["execution_device"])
+
+    if info["env_values"]:
+        env_desc = ", ".join(
+            f"{name}={value}" for name, value in info["env_values"].items()
+        )
+    else:
+        env_desc = "<unset>"
+    logger.info("%sVisible device env: %s", prefix, env_desc)
+
+    if info["physical_target"]:
+        logger.info(
+            "%sResolved physical target: %s (executed as %s)",
+            prefix,
+            info["physical_target"],
+            info["execution_device"],
+        )
+
+    if info["physical_devices"]:
+        logger.info(
+            "%sTensorFlow physical devices: %s",
+            prefix,
+            info["physical_devices"],
+        )
+
+    if info["local_devices"]:
+        logger.info(
+            "%sTensorFlow local devices: %s",
+            prefix,
+            info["local_devices"],
+        )
 
 
 def inspect_latest_after_fusion_dump(
@@ -174,7 +344,10 @@ class AccuracyComparator:
         Returns:
             推理结果 ndarray，失败返回 None
         """
-        self.logger.info(f"  在 {device_type} 上运行推理...")
+        device_label = format_runtime_device_label(device_type)
+        self.logger.info(f"  在 {device_label} 上运行推理...")
+        log_runtime_device_info(self.logger, device_type, prefix="  ")
+        target_device = get_tf_execution_device_name(device_type)
 
         with tf.Graph().as_default() as graph:
             tf.import_graph_def(graph_def, name="")
@@ -203,32 +376,20 @@ class AccuracyComparator:
                 try:
                     # 预热
                     for _ in range(warmup_rounds):
-                        if device_type == "MUSA":
-                            with tf.device("/device:MUSA:0"):
-                                sess.run(output_tensor, feed_dict=session_feed_dict)
-                        else:
-                            with tf.device("/device:CPU:0"):
-                                sess.run(output_tensor, feed_dict=session_feed_dict)
+                        with tf.device(target_device):
+                            sess.run(output_tensor, feed_dict=session_feed_dict)
 
                     # 正式推理
-                    if device_type == "MUSA":
-                        with tf.device("/device:MUSA:0"):
-                            result = sess.run(
-                                output_tensor, feed_dict=session_feed_dict
-                            )
-                    else:
-                        with tf.device("/device:CPU:0"):
-                            result = sess.run(
-                                output_tensor, feed_dict=session_feed_dict
-                            )
+                    with tf.device(target_device):
+                        result = sess.run(output_tensor, feed_dict=session_feed_dict)
 
                     self.logger.info(
-                        f"  {device_type} 推理完成, shape={result.shape}, dtype={result.dtype}"
+                        f"  {device_label} 推理完成, shape={result.shape}, dtype={result.dtype}"
                     )
                     return result
 
                 except Exception as e:
-                    self.logger.error(f"  {device_type} 推理失败: {e}")
+                    self.logger.error(f"  {device_label} 推理失败: {e}")
                     import traceback
 
                     traceback.print_exc()
@@ -539,10 +700,19 @@ class GraphProfiler:
         self.output_tensor = output_tensor
         self.batch_size = batch_size
         self.device_type = device_type.upper()
+        self.runtime_device_info = get_runtime_device_info(self.device_type)
+        self.device_label = format_runtime_device_label(self.device_type)
         self.operator_timings = collections.defaultdict(list)
         self.log_mgr = get_log_manager("graph_inference")
         self.logger = self.log_mgr.get_logger("profiler", "inference.log")
         self.trace_dir = self.log_mgr.trace_dir
+        self._device_info_logged = False
+
+    def _log_runtime_device_info_once(self) -> None:
+        if self._device_info_logged:
+            return
+        log_runtime_device_info(self.logger, self.device_type)
+        self._device_info_logged = True
 
     @staticmethod
     def compute_trimmed_stats(
@@ -587,11 +757,12 @@ class GraphProfiler:
     ) -> Dict[str, Any]:
         """仅运行 warmup 和 inference，不进行其他分析"""
         self.logger.info("=" * 60)
-        self.logger.info(f"INFERENCE-ONLY MODE (Device: {self.device_type})")
+        self.logger.info(f"INFERENCE-ONLY MODE (Device: {self.device_label})")
         self.logger.info("=" * 60)
         self.logger.info(
             f"Warmup rounds: {warmup_rounds}, Inference rounds: {inference_rounds}"
         )
+        self._log_runtime_device_info_once()
 
         config = create_session_config(
             device_type=self.device_type,
@@ -643,6 +814,9 @@ class GraphProfiler:
 
         perf_result = {
             "device_type": self.device_type,
+            "device_label": self.device_label,
+            "runtime_device": self.runtime_device_info["runtime_device"],
+            "execution_device": self.runtime_device_info["execution_device"],
             "warmup_rounds": warmup_rounds,
             "inference_rounds": inference_rounds,
             "valid_samples": valid_count,
@@ -667,8 +841,9 @@ class GraphProfiler:
     ) -> Dict[str, Any]:
         """整网性能分析"""
         self.logger.info("=" * 60)
-        self.logger.info(f"整网性能分析 (Device: {self.device_type})")
+        self.logger.info(f"整网性能分析 (Device: {self.device_label})")
         self.logger.info("=" * 60)
+        self._log_runtime_device_info_once()
 
         config = create_session_config(
             device_type=self.device_type,
@@ -717,6 +892,9 @@ class GraphProfiler:
 
         perf_result = {
             "device_type": self.device_type,
+            "device_label": self.device_label,
+            "runtime_device": self.runtime_device_info["runtime_device"],
+            "execution_device": self.runtime_device_info["execution_device"],
             "warmup_rounds": warmup_rounds,
             "profiling_rounds": profiling_rounds,
             "valid_samples": valid_count,
@@ -743,6 +921,7 @@ class GraphProfiler:
         self.logger.info("=" * 60)
         self.logger.info("单算子性能分析 (Operator Performance)")
         self.logger.info("=" * 60)
+        self._log_runtime_device_info_once()
 
         config = create_session_config(
             device_type=self.device_type,
@@ -815,12 +994,15 @@ class GraphProfiler:
             )
 
         self.logger.info("\n" + "=" * 80)
-        self.logger.info(f"算子执行时间统计 (Device: {self.device_type})")
+        self.logger.info(f"算子执行时间统计 (Device: {self.device_label})")
         self.logger.info("=" * 80)
 
         op_stats = []
         for dev_stat in run_meta.step_stats.dev_stats:
             device_name = dev_stat.device
+            display_device_name = format_profile_device_name(
+                device_name, self.device_type
+            )
             for node_stat in dev_stat.node_stats:
                 op_name = node_stat.node_name
                 if node_stat.all_end_rel_micros:
@@ -831,6 +1013,7 @@ class GraphProfiler:
                             "name": op_name,
                             "op_type": op_type,
                             "device": device_name,
+                            "display_device": display_device_name,
                             "duration_ms": duration_ms,
                         }
                     )
@@ -840,7 +1023,7 @@ class GraphProfiler:
         if PRETTYTABLE_AVAILABLE and op_stats:
             self.logger.info("\n" + "=" * 110)
             self.logger.info(
-                f"算子执行时间统计 (Device: {self.device_type}, Top 30 by Duration)"
+                f"算子执行时间统计 (Device: {self.device_label}, Top 30 by Duration)"
             )
             self.logger.info("=" * 110)
 
@@ -863,9 +1046,7 @@ class GraphProfiler:
                         i,
                         stat["name"][:45] if len(stat["name"]) > 45 else stat["name"],
                         stat["op_type"],
-                        stat["device"].split("/")[-1]
-                        if "/" in stat["device"]
-                        else stat["device"],
+                        stat["display_device"],
                         f"{stat['duration_ms']:.3f}",
                     ]
                 )
@@ -889,7 +1070,7 @@ class GraphProfiler:
             )
 
             self.logger.info("\n" + "=" * 80)
-            self.logger.info(f"按算子类型汇总 (Device: {self.device_type})")
+            self.logger.info(f"按算子类型汇总 (Device: {self.device_label})")
             self.logger.info("=" * 80)
 
             type_table = PrettyTable()
@@ -930,13 +1111,8 @@ class GraphProfiler:
             )
             self.logger.info("-" * 100)
             for stat in op_stats[:30]:
-                device_short = (
-                    stat["device"].split("/")[-1]
-                    if "/" in stat["device"]
-                    else stat["device"]
-                )
                 self.logger.info(
-                    f"{stat['name']:<45} {stat['op_type']:<20} {device_short:<20} {stat['duration_ms']:<12.3f}"
+                    f"{stat['name']:<45} {stat['op_type']:<20} {stat['display_device']:<20} {stat['duration_ms']:<12.3f}"
                 )
 
         self.logger.info("=" * 80)
@@ -963,6 +1139,9 @@ class GraphProfiler:
                 json.dump(
                     {
                         "device_type": self.device_type,
+                        "device_label": self.device_label,
+                        "runtime_device": self.runtime_device_info["runtime_device"],
+                        "execution_device": self.runtime_device_info["execution_device"],
                         "operators": op_stats,
                         "total_operators": len(op_stats),
                         "op_type_summary": [
@@ -1055,7 +1234,7 @@ class GraphProfiler:
         if PRETTYTABLE_AVAILABLE:
             self.logger.info("\n" + "=" * 100)
             self.logger.info(
-                f"算子执行时间统计 (Device: {self.device_type}, Top 30 by Total Time)"
+                f"算子执行时间统计 (Device: {self.device_label}, Top 30 by Total Time)"
             )
             self.logger.info("=" * 100)
 
@@ -1091,7 +1270,7 @@ class GraphProfiler:
         else:
             self.logger.info("\n" + "=" * 80)
             self.logger.info(
-                f"算子执行时间统计 (Device: {self.device_type}, Top 30 by Total Time)"
+                f"算子执行时间统计 (Device: {self.device_label}, Top 30 by Total Time)"
             )
             self.logger.info("=" * 80)
             self.logger.info(
@@ -1111,6 +1290,9 @@ class GraphProfiler:
             json.dump(
                 {
                     "device_type": self.device_type,
+                    "device_label": self.device_label,
+                    "runtime_device": self.runtime_device_info["runtime_device"],
+                    "execution_device": self.runtime_device_info["execution_device"],
                     "operators": [
                         {
                             "name": stat["name"],
@@ -1142,7 +1324,9 @@ class GraphProfiler:
         self.logger.info("=" * 60)
         self.logger.info("PERFORMANCE SUMMARY (Trimmed Mean: 80%)")
         self.logger.info("=" * 60)
-        self.logger.info(f"Device: {perf_result['device_type']}")
+        self.logger.info(
+            f"Device: {perf_result.get('device_label', perf_result['device_type'])}"
+        )
         self.logger.info(f"Batch Size: {perf_result['batch_size']}")
         self.logger.info(
             f"Total Rounds: {perf_result.get('inference_rounds', perf_result.get('profiling_rounds', 'N/A'))}"
@@ -1165,7 +1349,9 @@ class GraphProfiler:
             table.align["Metric"] = "l"
             table.align["Value"] = "r"
 
-            table.add_row(["Device", perf_result["device_type"]])
+            table.add_row(
+                ["Device", perf_result.get("device_label", perf_result["device_type"])]
+            )
             table.add_row(["Batch Size", perf_result["batch_size"]])
             table.add_row(
                 [
@@ -1333,8 +1519,11 @@ def run_inference(
 ) -> Optional[np.ndarray]:
     """执行图推理"""
     logger = logging.getLogger("graph_inference.main")
-    logger.info(f"\n=== 执行图推理 (Device: {device_type}) ===")
+    device_label = format_runtime_device_label(device_type)
+    logger.info(f"\n=== 执行图推理 (Device: {device_label}) ===")
     logger.info(f"输出节点：{output_node_name}")
+    log_runtime_device_info(logger, device_type)
+    target_device = get_tf_execution_device_name(device_type)
 
     devices = tf.config.list_physical_devices()
     logger.info(f"Available devices: {[d.name for d in devices]}")
@@ -1376,11 +1565,8 @@ def run_inference(
         with tf.compat.v1.Session(graph=graph, config=config) as sess:
             try:
                 logger.info(">>> Session Run Start...")
-                if device_type == "MUSA":
-                    with tf.device("/device:MUSA:0"):
-                        result = sess.run(output_tensor, feed_dict=session_feed_dict)
-                elif device_type == "CUDA":
-                    with tf.device("/GPU:0"):
+                if device_type in ("MUSA", "CUDA", "CPU"):
+                    with tf.device(target_device):
                         result = sess.run(output_tensor, feed_dict=session_feed_dict)
                 else:
                     result = sess.run(output_tensor, feed_dict=session_feed_dict)

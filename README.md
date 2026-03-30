@@ -63,29 +63,42 @@ standard_model/
 
 ### 2. wukong / rankmixer / onetrans / tokenmixer-large / fwfm / fgcnn / xdeepfm / dien / dsin
 
-`wukong` 是一个 TensorFlow/Keras 模型脚本，适合验证：
+这一组目录都是 TensorFlow/Keras 动态模型，整体更适合做：
 
-- 动态模型在 MUSA 上是否能正常前向执行
-- 整网推理性能
+- 动态模型在 MUSA 上的算子通过性验证
+- 插件加载后整网前向是否能正常执行
 - eager / `tf.function` 路径下的运行情况
+- 整网推理性能与端到端稳定性验证
 
-它更偏向“模型级功能与性能验证”，而不是严格的 GraphDef 融合可视化验证。
+它们整体更偏向“模型级功能与性能验证”，而不是像 `prunedGraph` 那样偏向 GraphDef 融合可视化验证。
 
-从模型结构和 profile 结果看，`wukong` 中常见的算子类型包括：
+从模型结构上看，这组模型大致可以分成三类：
+
+- `wukong` / `rankmixer` / `onetrans` / `tokenmixer-large`
+  这几类模型以 embedding、token mixing、attention、LayerNorm、MLP 为主，更适合验证 `MatMul` / `BatchMatMulV2` / `Softmax` / `LayerNormalization` / `Reshape` / `Transpose` / `ConcatV2` / `Stack` 等算子的整网执行情况。
+- `fwfm` / `fgcnn` / `xdeepfm`
+  这几类模型以 CTR 特征交互为主，除了 embedding 和 MLP 外，还覆盖了内积、卷积、Flatten、特征重组等路径，适合验证 `Conv1D` / `Conv2D` / `MatMul` / `BatchNormalization` / `Relu` / `ConcatV2` / `Reshape` 等算子。
+- `dien` / `dsin`
+  这两类模型包含更明显的序列建模与兴趣演化结构，覆盖 attention、GRU/LSTM、双向序列结构、softmax 打分等路径，适合验证 `MatMul` / `Softmax` / `ConcatV2` / `Reshape` / `Transpose` / `LSTM` / `GRU` 相关整网执行路径。
+
+综合这些模型的实现，常见算子类型包括：
 
 - `ResourceGather` / `ReadVariableOp`
-- `MatMul` / `BatchMatMulV2`
-- `FusedBatchNormV3`
-- `Relu`
-- `AddV2` / `Mul` / `Sub`
-- `Reshape` / `Transpose` / `StridedSlice` / `Pack` / `Fill`
-- `ConcatV2`
-- `Rsqrt`
+- `MatMul` / `BatchMatMulV2` / `Einsum`
+- `FusedBatchNormV3` / `LayerNormalization`
+- `Relu` / `Gelu` / `Sigmoid` / `Tanh` / `Softmax`
+- `BiasAdd` / `AddV2` / `Mul` / `Sub`
+- `Reshape` / `Transpose` / `StridedSlice` / `Pack` / `Stack` / `Split` / `ExpandDims` / `Squeeze` / `Tile` / `Fill`
+- `ConcatV2` / `MatrixSetDiag`
+- `ReduceMean` / `ReduceSum`
+- `Conv1D` / `Conv2D` / `Flatten`
+- `LSTM` / `GRU`
+- `Rsqrt` / `Sqrt` / `Square` / `Pow`
+- `Cast` / `Equal` / `Where` / `ClipByValue`
+- `TensorArray` / `While` / `SequenceMask`
 - `Send`（跨设备数据搬运事件，在 profiler 中可见）
 
-需要注意的是，当前 `wukong` 模型本身使用的是 `ReLU`，不是 `GELU`，因此它不适合作为 `MusaGelu` 融合命中的验证模型；但它仍然适合验证插件加载、设备执行和整网性能。
-
-- `rankmixer` / `onetrans` / `tokenmixer-large` / `fwfm` / `fgcnn` / `xdeepfm` / `dien` / `dsin` 和 `wukong` 类似，需要测试下算子通过性
+因此，这组模型更适合作为“整网功能、算子通过性、设备执行和性能”验证入口，而不是单独用来判断某一个 graph fusion pattern 是否命中。
 
 |模型|通过性|
 :---:|:---:|
