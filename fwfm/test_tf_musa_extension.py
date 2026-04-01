@@ -8,6 +8,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tf_test_model.utils import get_default_musa_plugin_path, resolve_musa_plugin_path
 
+# 设置 MUSA 可见设备（从环境变量读取）
+musa_visible_devices = os.environ.get("MUSA_VISIBLE_DEVICES", "")
+if musa_visible_devices:
+    os.environ["MUSA_VISIBLE_DEVICES"] = musa_visible_devices
+    print(f"MUSA_VISIBLE_DEVICES set to: {musa_visible_devices}")
+
 parser = argparse.ArgumentParser(description="Test TensorFlow MUSA Library")
 parser.add_argument(
     "tensorflow_musa_library_path",
@@ -69,7 +75,9 @@ model = FwFM(
 #                                  TRAINING SPECIFIC CONFIGURATION                                 #
 ####################################################################################################
 BATCH_SIZE = 2
-TRAIN_EPOCHS = 10
+# 从环境变量读取训练轮数，默认为10
+TRAIN_EPOCHS = int(os.environ.get("TRAIN_EPOCHS", "10"))
+print(f"TRAIN_EPOCHS set to: {TRAIN_EPOCHS}")
 PEAK_LR = 0.004
 INIT_LR = 1e-8
 TOTAL_STEPS_PER_EPOCH = 39291958 // BATCH_SIZE
@@ -280,7 +288,10 @@ inputs = (
 labels = tf.convert_to_tensor(np.array([1, 0], dtype=np.float32))
 
 try:
-    _ = train_step(inputs, labels)
+    # 训练循环：执行 TRAIN_EPOCHS 次训练步骤
+    for epoch in range(TRAIN_EPOCHS):
+        loss = train_step(inputs, labels)
+        print(f"Epoch {epoch + 1}/{TRAIN_EPOCHS}, Loss: {loss.numpy():.4f}")
     _ = validate(model, [(inputs, labels)])
 except Exception as e:
     print(f"Error during training or validation: {e}")
