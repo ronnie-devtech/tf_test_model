@@ -25,6 +25,21 @@ standard_model/
 ├── fgcnn/               # fgcnn深度学习模型
 │   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
 │   └── logs/                   # 日志和trace文件输出目录
+├── din/               # din深度学习模型
+│   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
+│   └── logs/                   # 日志和trace文件输出目录
+├── esmm/               # esmm深度学习模型
+│   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
+│   └── logs/                   # 日志和trace文件输出目录
+├── flen/               # flen深度学习模型
+│   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
+│   └── logs/                   # 日志和trace文件输出目录
+├── mmoe/               # mmoe深度学习模型
+│   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
+│   └── logs/                   # 日志和trace文件输出目录
+├── ple/               # ple深度学习模型
+│   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
+│   └── logs/                   # 日志和trace文件输出目录
 └── fwfm/               # fwfm深度学习模型
     ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
     └── logs/                   # 日志和trace文件输出目录
@@ -111,6 +126,11 @@ dsin|✅
 fgcnn|✅
 onetrans|❌
 dien|❌
+din|✅
+esmm|✅
+flen|✅
+mmoe|✅
+ple|✅
 
 ## 通用命令行参数
 

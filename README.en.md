@@ -25,6 +25,21 @@ standard_model/
 ├── fgcnn/
 │   ├── test_tf_musa_extension.py
 │   └── logs/
+├── din/
+│   ├── test_tf_musa_extension.py
+│   └── logs/
+├── esmm/
+│   ├── test_tf_musa_extension.py
+│   └── logs/
+├── flen/
+│   ├── test_tf_musa_extension.py
+│   └── logs/
+├── mmoe/
+│   ├── test_tf_musa_extension.py
+│   └── logs/
+├── ple/
+│   ├── test_tf_musa_extension.py
+│   └── logs/
 └── fwfm/
     ├── test_tf_musa_extension.py
     └── logs/
@@ -111,6 +126,11 @@ So this model group is better used for end-to-end functionality, operator pass-r
 | fgcnn | ✅ |
 | onetrans | ❌ |
 | dien | ❌ |
+| din | ✅ |
+| esmm | ✅ |
+| flen | ✅ |
+| flen | ✅ |
+| ple | ✅ |
 
 ## Common Command-Line Arguments
 
