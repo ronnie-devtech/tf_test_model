@@ -1,302 +1,110 @@
-# Standard Model Performance Testing Framework
+# TensorFlow MUSA 模型训练测试
 
-本目录包含两个标准模型的性能测试脚本，用于评估TensorFlow MUSA PluggableDevice的整网性能。
+本目录包含多个推荐模型的 TensorFlow MUSA 扩展训练测试。
 
 ## 目录结构
 
 ```
-standard_model/
-├── prunedGraph/          # 剪枝后的图模型 (GraphDef格式)
-│   ├── run_graph_tf_musa.py    # 主要测试脚本
-│   └── logs/                   # 日志和trace文件输出目录
-├── wukong/               # Wukong深度学习模型
-│   ├── run_wukong_tf_musa.py   # 主要测试脚本  
-│   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
-│   └── logs/                   # 日志和trace文件输出目录
-├── rankmixer/               # rankmixer深度学习模型
-│   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
-│   └── logs/                   # 日志和trace文件输出目录
-├── onetrans/               # onetrans深度学习模型
-│   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
-│   └── logs/                   # 日志和trace文件输出目录
-├── tokenmixer-large/               # tokenmixer-large深度学习模型
-│   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
-│   └── logs/                   # 日志和trace文件输出目录
-├── fgcnn/               # fgcnn深度学习模型
-│   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
-│   └── logs/                   # 日志和trace文件输出目录
-├── din/               # din深度学习模型
-│   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
-│   └── logs/                   # 日志和trace文件输出目录
-├── esmm/               # esmm深度学习模型
-│   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
-│   └── logs/                   # 日志和trace文件输出目录
-├── flen/               # flen深度学习模型
-│   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
-│   └── logs/                   # 日志和trace文件输出目录
-├── mmoe/               # mmoe深度学习模型
-│   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
-│   └── logs/                   # 日志和trace文件输出目录
-├── ple/               # ple深度学习模型
-│   ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
-│   └── logs/                   # 日志和trace文件输出目录
-└── fwfm/               # fwfm深度学习模型
-    ├── test_tf_musa_extension.py   # 测试 tensorflow musa extension .so 文件是否能跑
-    └── logs/                   # 日志和trace文件输出目录
+training/
+├── run_all_training_tests.py  # 统一测试入口脚本
+├── test_utils.py              # 公共测试工具函数
+├── deepfm/                    # DeepFM 模型
+├── dien/                      # DIEN 模型
+├── din/                       # DIN 模型
+├── dsin/                      # DSIN 模型
+├── esmm/                      # ESMM 模型
+├── fgcnn/                     # FGCNN 模型
+├── flen/                      # FLEN 模型
+├── fwfm/                      # FwFM 模型
+├── mmoe/                      # MMoE 模型
+├── onetrans/                  # OneTrans 模型
+├── ple/                       # PLE 模型
+├── rankmixer/                 # RankMixer 模型
+├── tokenmixer-large/          # TokenMixer-Large 模型
+├── wukong/                    # WuKong 模型（训练）
+└── xdeepfm/                   # xDeepFM 模型
+
+inference/
+├── prunedGraph/               # 腾讯中台模型
+└── wukong/                    # WuKong 模型（推理）
 ```
 
-## 测试模型说明
-
-### 1. prunedGraph
-
-`prunedGraph` 是一个已经固化好的 `GraphDef(.pb)` 模型，适合验证：
-
-- 自定义 graph optimizer 是否被正确加载
-- 融合 pattern 是否命中
-- 融合后的自定义算子是否真的进入最终执行图
-- CPU vs MUSA 的端到端精度是否一致
-
-这个模型对图优化开发尤其有价值，因为它天然是图模式，便于：
-
-- dump `before_fusion / after_fusion / final` 图
-- 在 Netron 中直接观察子图是否被替换
-- 检查融合算子是否在最终输出路径上可达
-
-从当前模型和日志看，`prunedGraph` 中常见的算子类型包括：
-
-- `MatMul` / `BatchMatMulV2`
-- `BiasAdd`
-- `AddV2` / `Mul` / `Sub` / `RealDiv`
-- `Reshape` / `Transpose` / `Pack` / `ConcatV2`
-- `GatherV2`
-- `Mean` / `Prod` / `Select`
-- `FusedBatchNormV3`
-- `Sqrt` / `Rsqrt`
-- 以及图优化命中后出现的融合算子，例如 `MusaGelu`
-
-如果后续要开发 graph fusion，`prunedGraph` 是优先推荐的验证入口。
-
-### 2. wukong / rankmixer / onetrans / tokenmixer-large / fwfm / fgcnn / xdeepfm / dien / dsin
-
-这一组目录都是 TensorFlow/Keras 动态模型，整体更适合做：
-
-- 动态模型在 MUSA 上的算子通过性验证
-- 插件加载后整网前向是否能正常执行
-- eager / `tf.function` 路径下的运行情况
-- 整网推理性能与端到端稳定性验证
-
-它们整体更偏向“模型级功能与性能验证”，而不是像 `prunedGraph` 那样偏向 GraphDef 融合可视化验证。
-
-从模型结构上看，这组模型大致可以分成三类：
-
-- `wukong` / `rankmixer` / `onetrans` / `tokenmixer-large`
-  这几类模型以 embedding、token mixing、attention、LayerNorm、MLP 为主，更适合验证 `MatMul` / `BatchMatMulV2` / `Softmax` / `LayerNormalization` / `Reshape` / `Transpose` / `ConcatV2` / `Stack` 等算子的整网执行情况。
-- `fwfm` / `fgcnn` / `xdeepfm`
-  这几类模型以 CTR 特征交互为主，除了 embedding 和 MLP 外，还覆盖了内积、卷积、Flatten、特征重组等路径，适合验证 `Conv1D` / `Conv2D` / `MatMul` / `BatchNormalization` / `Relu` / `ConcatV2` / `Reshape` 等算子。
-- `dien` / `dsin`
-  这两类模型包含更明显的序列建模与兴趣演化结构，覆盖 attention、GRU/LSTM、双向序列结构、softmax 打分等路径，适合验证 `MatMul` / `Softmax` / `ConcatV2` / `Reshape` / `Transpose` / `LSTM` / `GRU` 相关整网执行路径。
-
-综合这些模型的实现，常见算子类型包括：
-
-- `ResourceGather` / `ReadVariableOp`
-- `MatMul` / `BatchMatMulV2` / `Einsum`
-- `FusedBatchNormV3` / `LayerNormalization`
-- `Relu` / `Gelu` / `Sigmoid` / `Tanh` / `Softmax`
-- `BiasAdd` / `AddV2` / `Mul` / `Sub`
-- `Reshape` / `Transpose` / `StridedSlice` / `Pack` / `Stack` / `Split` / `ExpandDims` / `Squeeze` / `Tile` / `Fill`
-- `ConcatV2` / `MatrixSetDiag`
-- `ReduceMean` / `ReduceSum`
-- `Conv1D` / `Conv2D` / `Flatten`
-- `LSTM` / `GRU`
-- `Rsqrt` / `Sqrt` / `Square` / `Pow`
-- `Cast` / `Equal` / `Where` / `ClipByValue`
-- `TensorArray` / `While` / `SequenceMask`
-- `Send`（跨设备数据搬运事件，在 profiler 中可见）
-
-因此，这组模型更适合作为“整网功能、算子通过性、设备执行和性能”验证入口，而不是单独用来判断某一个 graph fusion pattern 是否命中。
-
-|模型|通过性|
-:---:|:---:|
-wukong|✅
-rankmixer|✅
-tokenmixer-large|✅
-fwfm|✅
-xdeepfm|✅
-dsin|✅
-fgcnn|✅
-onetrans|❌
-dien|❌
-din|✅
-esmm|✅
-flen|✅
-mmoe|✅
-ple|✅
-
-## 通用命令行参数
-
-两个模型脚本支持相同的命令行参数：
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--device` | `musa` | 运行设备：`cpu` 或 `musa` |
-| `--batch-size` | `100`(prunedGraph) / `1024`(wukong) | 批次大小 |
-| `--warmup-rounds` | `5` | 预热轮数 |
-| `--inference-rounds` | `20` | 推理轮数 |
-| `--musa-plugin` | 自动探测 `libmusa_plugin.so` | MUSA插件路径，可被 `MUSA_PLUGIN_PATH` 或命令行覆盖 |
-
-## `.so` 加载入口与路径策略
-
-当前 `tf_test_model` 中会主动加载 `libmusa_plugin.so` 的脚本有：
-
-- `prunedGraph/run_graph_tf_musa.py`
-- `wukong/run_wukong_tf_musa.py`
-- `wukong/test_tf_musa_extension.py`
-
-这些脚本统一通过 `utils.py` 里的路径解析逻辑加载插件。
-
-默认优先级：
-
-1. `MUSA_PLUGIN_PATH` 环境变量
-2. 相邻工作区相对路径 `../tensorflow_musa_extension/build/libmusa_plugin.so`
-3. 相邻工作区相对路径 `../tensorflow_musa_extension/build_local/libmusa_plugin.so`
-4. Docker 绝对路径 `/workspace/tensorflow_musa_extension/build/libmusa_plugin.so`
-
-推荐优先使用相邻工作区路径；Docker 绝对路径保留为容器内 fallback。
-
-如果需要手动填写路径，推荐直接覆盖 `--musa-plugin` 参数：
+## 训练样例使用方法
+```bash
+cd training
+```
+### 查看可用模型
 
 ```bash
-# 推荐：相邻工作区相对路径
-python prunedGraph/run_graph_tf_musa.py --device musa \
-  --musa-plugin ../tensorflow_musa_extension/build/libmusa_plugin.so
-
-# 容器内常见绝对路径
-python prunedGraph/run_graph_tf_musa.py --device musa \
-  --musa-plugin /workspace/tensorflow_musa_extension/build/libmusa_plugin.so
+python run_all_training_tests.py --list-models
 ```
 
-`wukong/test_tf_musa_extension.py` 也支持两种用法：
+### 运行所有模型测试
 
 ```bash
-# 自动探测默认路径
-python3 wukong/test_tf_musa_extension.py
-
-# 手动指定路径
-python3 wukong/test_tf_musa_extension.py ../tensorflow_musa_extension/build/libmusa_plugin.so
+python run_all_training_tests.py --epochs 10 --musa-plugin ../../tensorflow_musa_extension/build/libmusa_plugin.so
 ```
 
-## 运行模式
-
-### 1. 整网推理性能测试 (推荐)
+### 运行指定模型测试
 
 ```bash
-# prunedGraph模型
-python prunedGraph/run_graph_tf_musa.py --inference-only
-
-# wukong模型  
-python wukong/run_wukong_tf_musa.py --inference-only
-
-# Wukong 精度对比
-python wukong/run_wukong_tf_musa.py --compare-accuracy
-
-# 指定自定义插件路径
-python wukong/run_wukong_tf_musa.py --compare-accuracy \
-  --musa-plugin /workspace/tensorflow_musa_extension/build/libmusa_plugin.so
-
-# 测试 libmusa_plugin.so
-python3 wukong/test_tf_musa_extension.py /path/to/libmusa_plugin.so
+python run_all_training_tests.py --epochs 10 --models deepfm wukong dien --musa-plugin ../../tensorflow_musa_extension/build/libmusa_plugin.so
 ```
 
-**输出位置**: 
-- `prunedGraph/logs/graph_inference/YYYY-MM-DD-HH.MM.SS_trace/`
-- `wukong/logs/tensorflow_inference/YYYY-MM-DD-HH.MM.SS_trace/`
-
-**生成文件**:
-- `inference_only_result_MUSA_*.json` - 性能结果
-- `inference_only_result_CPU_*.json` - CPU对比结果
-
-### 2. 算子级性能分析
+### 指定 GPU 设备
 
 ```bash
-# prunedGraph模型
-python prunedGraph/run_graph_tf_musa.py --profile-ops
+# 单 GPU
+python run_all_training_tests.py --epochs 10 --gpu 0 --musa-plugin ../../tensorflow_musa_extension/build/libmusa_plugin.so
 
-# wukong模型
-python wukong/run_wukong_tf_musa.py --profile-ops
+# 多 GPU
+python run_all_training_tests.py --epochs 10 --gpu 0,1,2 --musa-plugin ../../tensorflow_musa_extension/build/libmusa_plugin.so
 ```
 
-**输出位置**: 同上，但会额外生成:
-- `ops_profile_MUSA_*/` - TensorFlow Profiler trace文件
-- `operator_timings_*.json` - 算子执行时间统计
-
-### 融合后算子可见性说明
-
-- 在开启 `MUSA_DUMP_GRAPHDEF=1` 后，`prunedGraph` 和 `wukong` 的 profiler 都会优先读取最新的 `after_fusion.pbtxt`，用优化后图覆盖 profiler 中的节点类型映射。
-- 这样做的目的是让 profiler 汇总尽量反映优化后的真实算子类型，而不是原始图中的基础算子类型。
-- 最终能看到哪些融合算子，取决于具体模型结构和图优化是否命中对应 pattern；不同模型看到的融合算子可能不同。
-
-示例：
+### 指定错误日志目录
 
 ```bash
-export MUSA_DUMP_GRAPHDEF=1
-export MUSA_DUMP_GRAPHDEF_DIR=/workspace/tensorflow_musa_extension/graph_debug
-python prunedGraph/run_graph_tf_musa.py --profile-ops
+python run_all_training_tests.py --epochs 10 --log-dir my_logs --musa-plugin ../../tensorflow_musa_extension/build/libmusa_plugin.so
 ```
 
-### 3. 完整分析模式
+### 参数说明
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--epochs` | 训练轮数 | 10 |
+| `--musa-plugin` | TensorFlow MUSA 库 .so 文件路径 | 无 |
+| `--models` | 指定要测试的模型列表 | 所有模型 |
+| `--gpu` | GPU 设备 ID (如: 0 或 0,1,2) | 无 |
+| `--log-dir` | 错误日志目录名 | error_logs |
+| `--list-models` | 列出所有可测试的模型 | - |
+
+### 输出说明
+
+测试完成后会输出结果摘要：
+
+```
+[OK] deepfm: PASSED
+[OK] wukong: PASSED
+[FAIL] dien: FAILED
+
+总计: 15 个模型
+成功: 14
+失败: 1
+```
+
+失败的模型错误详情会保存在 `--log-dir` 目录下的 `<model_name>_error.log` 文件中。
+
+### 单独测试某个模型
+
+也可以直接进入模型目录运行单独测试：
 
 ```bash
-# 不加任何特殊参数，默认运行完整分析
-python prunedGraph/run_graph_tf_musa.py
-python wukong/run_wukong_tf_musa.py
+cd deepfm
+python test_tf_musa_extension.py --musa_plugin ../../tensorflow_musa_extension/build/libmusa_plugin.so --epochs 10
 ```
 
-**包含内容**:
-- 整网性能分析
-- 算子级性能分析  
-- 模型结构分析 (wukong)
-- 设备信息分析
-
-## 性能对比建议
-
-1. **CPU vs MUSA对比**: 分别在`--device cpu`和`--device musa`下运行相同配置
-2. **不同Batch Size**: 测试不同batch size对性能的影响
-3. **多次运行取平均**: 由于系统负载波动，建议多次运行取平均值
-
-## 输出文件说明
-
-### 性能结果文件 (`inference_only_result_*.json`)
-```json
-{
-  "device_type": "MUSA",
-  "warmup_rounds": 5,
-  "profiling_rounds": 20,
-  "average_time": 0.04221096634864807,
-  "min_time": 0.032160401344299316,
-  "max_time": 0.06770586967468262,
-  "average_throughput": 2425.909872667003,
-  "batch_size": 1024
-}
+## 推理样例使用方法
+```bash
+cd inference
 ```
-
-### 算子时间文件 (`operator_timings_*.json`)
-```json
-{
-  "device_type": "MUSA",
-  "operators": [
-    {
-      "name": "MatMul",
-      "total_time_ms": 12.345,
-      "count": 2,
-      "avg_time_ms": 6.172
-    }
-  ]
-}
-```
-
-## 故障排除
-
-1. **MUSA插件加载失败**: 确保`tensorflow_musa_extension`已正确编译
-2. **找不到模型文件**: 确保模型文件放在正确位置或使用`--model`参数指定
-3. **内存不足**: 减小`--batch-size`参数值
-4. **性能异常**: 检查是否有算子fallback到CPU执行
+进入对应模型目录并运行推理代码即可
