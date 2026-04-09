@@ -78,7 +78,7 @@ def run_model_test(
 
     # 设置环境变量传递 epochs 和 gpu 参数
     env = os.environ.copy()
-    env["TRAIN_EPOCHS"] = str(epochs)
+    # env["TRAIN_EPOCHS"] = str(epochs)
     if gpu_devices:
         env["MUSA_VISIBLE_DEVICES"] = gpu_devices
 
@@ -90,6 +90,7 @@ def run_model_test(
         if not plugin_path.is_absolute():
             plugin_path = (SCRIPT_DIR / musa_plugin).resolve()
         cmd.extend(["--musa_plugin", str(plugin_path)])
+    cmd.extend(["--epochs", str(epochs)])
 
     print(f"\n{'='*60}")
     print(f"Running test for model: {model_name}")
