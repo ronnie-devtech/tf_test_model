@@ -41,6 +41,7 @@ def load_musa_plugin(musa_plugin_path):
     else:
         print("[Info] MUSA Plugin loading skipped. Running on CPU.")
 
+
 def load_meta(spec_path: Path):
     meta = tf.compat.v1.MetaGraphDef()
     meta.ParseFromString(spec_path.read_bytes())
@@ -121,6 +122,17 @@ def parse_bs_values(bs_arg):
             seen.add(v)
             values.append(v)
     return values
+
+
+def parse_bool(v):
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s in ("1", "true", "t", "yes", "y", "on"):
+        return True
+    if s in ("0", "false", "f", "no", "n", "off"):
+        return False
+    raise argparse.ArgumentTypeError(f"invalid bool value: {v}")
 
 
 def random_array(shape, np_dtype, rng):
@@ -276,7 +288,11 @@ def run_single_spec(spec_path: Path, pb_path: Path, args, bs: int):
     graph_def.ParseFromString(pb_path.read_bytes())
 
     with tf.Graph().as_default() as graph:
-        tf.import_graph_def(graph_def, name="")
+        if args.device:
+            with tf.device(args.device):
+                tf.import_graph_def(graph_def, name="")
+        else:
+            tf.import_graph_def(graph_def, name="")
         outputs = [graph.get_tensor_by_name(name) for name in output_spec]
         def safe_shape(tensor):
             if tensor.shape.rank is None:
@@ -308,21 +324,11 @@ def run_single_spec(spec_path: Path, pb_path: Path, args, bs: int):
             if tensor.op.type in ("Placeholder", "PlaceholderWithDefault"):
                 value = random_array(run_shape, tensor.dtype.as_numpy_dtype, rng)
                 feed_dict[tensor] = value
-            inputs.append(
-                {
-                    "name": name,
-                    "op_type": tensor.op.type,
-                    "dtype": tensor.dtype.name,
-                    "shape_in_spec": spec_shape,
-                    "shape_in_graph": tensor_shape,
-                    "shape_merged": merged_shape,
-                    "shape_used": run_shape,
-                    "slice_min_dims": slice_min_dims.get(name, {}),
-                    "fed": tensor in feed_dict,
-                }
-            )
 
-        with tf.compat.v1.Session(graph=graph) as sess:
+        session_config = tf.compat.v1.ConfigProto()
+        session_config.allow_soft_placement = bool(args.allow_soft_placement)
+        session_config.log_device_placement = bool(args.log_device_placement)
+        with tf.compat.v1.Session(graph=graph, config=session_config) as sess:
             try:
                 for _ in range(max(0, args.warmup)):
                     sess.run(outputs, feed_dict=feed_dict)
@@ -334,19 +340,12 @@ def run_single_spec(spec_path: Path, pb_path: Path, args, bs: int):
             except Exception:
                 run_error = traceback.format_exc()
 
-    realized_output = []
-    for t, v in zip(outputs, (last_vals or [])):
-        realized_output.append({"name": t.name, "optype": t.op.type, "dtype": str(v.dtype), "shape": list(v.shape)})
-
     return {
         "spec_path": str(spec_path),
         "pb_path": str(pb_path),
         "batch_size": bs,
-        "num of inputs": len(inputs),
-        "inputs": inputs,
         "num of outputs": len(output_info),
         "outputs": output_info,
-        "realized_outputs_last_iter": realized_output,
         "status": "ok" if run_error is None else "failed",
         "error_core": extract_core_error(run_error),
         "error": run_error,
@@ -390,6 +389,8 @@ def convert_spec_to_pb(spec_path: Path, convert_script: Path, seed: int):
         str(seed),
     ]
     env = dict(os.environ)
+    # Conversion only needs graph freezing; forcing CPU avoids GPU OOM contention
+    # with the long-lived runner process.
     res = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if res.returncode != 0:
         core = extract_core_error(res.stderr) or extract_core_error(res.stdout)
@@ -419,7 +420,10 @@ def main():
     parser.add_argument("--run_iters", type=int, default=10, help="Measured iterations.")
     parser.add_argument("--seed", type=int, default=2026, help="Random seed.")
     parser.add_argument("--out_root", default="runner_out", help="Output root directory.")
-    parser.add_argument("--strict", default=True, help="Exit non-zero when any runtime/convert fails.")
+    parser.add_argument("--strict", type=parse_bool, default=True, help="Exit non-zero when any runtime/convert fails.")
+    parser.add_argument("--device", default="/device:MUSA:0", choices=["/device:MUSA:0", "/device:CPU:0"], help="Device scope for imported graph, e.g. /device:MUSA:0 or /CPU:0.")
+    parser.add_argument("--allow_soft_placement", type=parse_bool, default=True, help="Whether TensorFlow can place unsupported ops on other devices.")
+    parser.add_argument("--log_device_placement", type=parse_bool, default=False, help="Print TensorFlow op placement logs.")
     parser.add_argument("--convert_script", default="convert_spec_to_pb.py", help="Path to convert spec->pb script.")
     parser.add_argument(
         "--musa-plugin",
@@ -429,11 +433,10 @@ def main():
         "sibling-workspace path or an absolute docker path; when omitted, "
         "the script auto-detects one.",
     )
+
+
     args = parser.parse_args()
-
-    args.musa_plugin = resolve_musa_plugin_path(args.musa_plugin)
-    load_musa_plugin(args.musa_plugin)
-
+    
     if bool(args.spec) == bool(args.spec_dir):
         raise ValueError("Provide exactly one of --spec or --spec_dir")
     if args.pb and not args.spec:
@@ -445,6 +448,16 @@ def main():
     convert_script = Path(args.convert_script).resolve()
     if not convert_script.exists():
         raise FileNotFoundError(f"convert script not found: {convert_script}")
+    if args.device and "MUSA" in str(args.device).upper():
+        args.musa_plugin = resolve_musa_plugin_path(args.musa_plugin)
+        load_musa_plugin(args.musa_plugin)
+        musa_devices = tf.config.list_physical_devices("MUSA")
+        if not musa_devices:
+            raise RuntimeError(
+                f"requested device {args.device}, but no MUSA devices are visible"
+            )
+    else:
+        print("[Info] MUSA Plugin loading skipped. Running on CPU.")
 
     specs = collect_specs(args.spec, args.spec_dir)
     auto_pb_root = out_root / datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -516,6 +529,7 @@ def main():
     }
 
     avg_time_summary = []
+    latency_summary = []
     for r in all_reports:
         timing = r.get("timing_ms") or {}
         avg_time_summary.append(
@@ -529,6 +543,7 @@ def main():
                 "error_core": r.get("error_core"),
             }
         )
+        latency_summary.append({"batch_size": r.get("batch_size"), "average_time_ms": timing.get("average")})
     avg_time_summary.sort(
         key=lambda x: (
             str(x.get("pb_path") or ""),
@@ -549,6 +564,7 @@ def main():
 
     print(f"[OK] report={report_path}")
     print(f"[OK] summary={summary}")
+    print(f"[OK] latency_summary={latency_summary}")
 
     if failures and args.strict:
         raise RuntimeError("some specs failed, see run_report.json")
@@ -558,6 +574,7 @@ if __name__ == "__main__":
     main()
 '''
 示例用法:
+  # 在 MUSA 设备上运行
   python musa_run_pb_graph.py --spec /path/to/*.spec --bs 1024
 
   '''
