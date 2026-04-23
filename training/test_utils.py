@@ -22,7 +22,7 @@ def parse_arguments():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description="Test TensorFlow MUSA Library")
     parser.add_argument(
-        "--musa_plugin",
+        "--musa-plugin",
         nargs="?",
         help="Path to the TensorFlow MUSA library .so file ",
     )
