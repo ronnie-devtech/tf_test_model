@@ -4,18 +4,47 @@ import tensorflow as tf
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from test_utils import setup_environment, parse_arguments, load_musa_plugin, set_random_seeds
+from test_utils import (
+    setup_environment,
+    parse_arguments,
+    load_musa_plugin,
+    set_random_seeds,
+)
 from model.onetrans import OneTrans
-from model.lr_schedule import LinearWarmup
+from data.criteo_kaggle_dataset import get_dataset
 
 
 def create_model():
     """创建 OneTrans 模型"""
     # 配置参数
-    NUM_CAT_FEATURES = 26
-    NUM_DENSE_FEATURES = 13
-    NUM_SPARSE_EMBS = [1000] * NUM_CAT_FEATURES
-    DIM_OUTPUT = 1
+    NUM_SPARSE_EMBS = [
+        1460,
+        583,
+        10131227,
+        2202608,
+        305,
+        24,
+        12517,
+        633,
+        3,
+        93145,
+        5683,
+        8351593,
+        3194,
+        27,
+        14992,
+        5461306,
+        10,
+        5652,
+        2173,
+        4,
+        7046547,
+        18,
+        15,
+        286181,
+        105,
+        142572,
+    ]
 
     NUM_LAYERS = 3
     LS = 26
@@ -41,220 +70,76 @@ def create_model():
     return model
 
 
-def separate_trainable_variables(model):
-    """分离可训练变量"""
-    # 配置参数
-    NUM_CAT_FEATURES = 26
-    NUM_DENSE_FEATURES = 13
+def create_dataset():
+    """创建数据集"""
+    NPZ_FILE_PATH = os.path.join(
+        os.path.dirname(__file__), "data/kaggleAdDisplayChallenge_processed_sub.npz"
+    )
+    BATCH_SIZE = 4096
+    train_dataset = get_dataset(
+        npz_file_path=NPZ_FILE_PATH,
+        split="train",
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+    )
 
-    # 构建模型
-    dummy_static_sparse = tf.zeros((1, NUM_CAT_FEATURES), dtype=tf.int32)
-    dummy_dense = tf.zeros((1, NUM_DENSE_FEATURES), dtype=tf.float32)
-    dummy_inputs = (dummy_static_sparse, dummy_dense)
-    _ = model(dummy_inputs, training=False)
-
-    embedding_parameters = []
-    other_parameters = []
-
-    for var in model.trainable_variables:
-        if hasattr(var, "path"):
-            # path is available in TF 2.13+
-            if "sparse_embedding" in var.path and "embeddings" in var.name:
-                embedding_parameters.append(var)
-            else:
-                other_parameters.append(var)
-        else:
-            if "sparse_embedding" in var.name:
-                embedding_parameters.append(var)
-            else:
-                other_parameters.append(var)
-
-    return embedding_parameters, other_parameters
+    valid_dataset = get_dataset(
+        npz_file_path=NPZ_FILE_PATH,
+        split="valid",
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+    )
+    return train_dataset, valid_dataset
 
 
 def create_optimizer_and_criterion():
     """创建优化器和损失函数"""
-    BATCH_SIZE = 2
-    PEAK_LR = 0.004
-    INIT_LR = 1e-8
-    TOTAL_STEPS_PER_EPOCH = 39291958 // BATCH_SIZE
-    TOTAL_ITERS = TOTAL_STEPS_PER_EPOCH
+    optimizer = tf.keras.optimizers.SGD(learning_rate=0.0001)
+    criterion = tf.keras.losses.BinaryCrossentropy(from_logits=True)
 
-    lr_schedule = LinearWarmup(
-        initial_learning_rate=INIT_LR, peak_learning_rate=PEAK_LR, warmup_steps=TOTAL_ITERS
-    )
-    embedding_optimizer = tf.keras.optimizers.SGD(learning_rate=lr_schedule)
-    other_optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
-    criterion = tf.keras.losses.BinaryCrossentropy(from_logits=False)
-
-    return embedding_optimizer, other_optimizer, criterion
+    return optimizer, criterion
 
 
-def create_sample_data():
-    """创建示例数据"""
-    inputs = (
-        tf.convert_to_tensor(
-            np.array(
-                [
-                    [
-                        0,
-                        101,
-                        110,
-                        239,
-                        3,
-                        5,
-                        106,
-                        5,
-                        0,
-                        284,
-                        101,
-                        104,
-                        99,
-                        0,
-                        406,
-                        260,
-                        1,
-                        291,
-                        1,
-                        2,
-                        992,
-                        0,
-                        1,
-                        187,
-                        1,
-                        2,
-                    ],
-                    [
-                        22,
-                        67,
-                        130,
-                        111,
-                        0,
-                        1,
-                        220,
-                        5,
-                        0,
-                        296,
-                        64,
-                        123,
-                        63,
-                        1,
-                        124,
-                        120,
-                        0,
-                        101,
-                        1,
-                        2,
-                        123,
-                        0,
-                        0,
-                        4,
-                        1,
-                        2,
-                    ],
-                ],
-                dtype=np.int32,
-            )
-        ),
-        tf.convert_to_tensor(
-            np.array(
-                [
-                    [
-                        1.0986123,
-                        5.1474943,
-                        1.0986123,
-                        2.0794415,
-                        3.0445225,
-                        2.0794415,
-                        1.0986123,
-                        2.0794415,
-                        2.0794415,
-                        0.6931472,
-                        0.6931472,
-                        0.0,
-                        2.0794415,
-                    ],
-                    [
-                        0.0,
-                        5.4595857,
-                        0.6931472,
-                        0.6931472,
-                        8.016977,
-                        5.1474943,
-                        4.158883,
-                        2.3978953,
-                        5.170484,
-                        0.0,
-                        2.0794415,
-                        0.0,
-                        0.6931472,
-                    ],
-                ],
-                dtype=np.float32,
-            )
-        ),
-    )
-
-    labels = tf.convert_to_tensor(np.array([1, 0], dtype=np.float32))
-
-    return inputs, labels
-
-
-def validate(model, dataset):
-    """验证函数"""
+def validate(model, dataset, criterion):
     num_samples = 0
-    num_correct = 0
-    pos_samples = 0
-    pos_correct = 0
+    total_logloss = 0.0
+    num_batches = 0
+    auc_metric = tf.keras.metrics.AUC(from_logits=True, name="val_auc")
 
     for inputs, labels in dataset:
         outputs = model(inputs, training=False)
-
         labels = tf.cast(labels, tf.float32)
         outputs = tf.squeeze(outputs)
 
-        predictions = tf.cast(outputs >= 0.5, tf.float32)
+        # Calculate batch Logloss
+        batch_loss = criterion(labels, outputs)
+        total_logloss += batch_loss.numpy()
+        num_batches += 1
 
+        # Update AUC metric
+        auc_metric.update_state(labels, outputs)
         num_samples += labels.shape[0]
-        pos_samples += tf.reduce_sum(labels).numpy()
 
-        correct_preds = tf.cast(tf.equal(predictions, labels), tf.float32)
-        num_correct += tf.reduce_sum(correct_preds).numpy()
-
-        pos_mask = tf.equal(labels, 1.0)
-        pos_correct += tf.reduce_sum(tf.boolean_mask(predictions, pos_mask)).numpy()
-
-    accuracy = num_correct / num_samples if num_samples > 0 else 0
-    recall_pos = pos_correct / pos_samples if pos_samples > 0 else 0
-    return accuracy, num_samples, recall_pos, pos_samples
+    # Compute final metrics
+    avg_logloss = float(total_logloss / num_batches) if num_batches > 0 else 0.0
+    auc_score = float(auc_metric.result().numpy())
+    auc_metric.reset_states()
+    return avg_logloss, auc_score, num_samples
 
 
 @tf.function
-def train_step(model, inputs, labels, embedding_optimizer, other_optimizer, criterion):
+def train_step(model, inputs, labels, optimizer, criterion):
     """单步训练函数"""
     with tf.GradientTape() as tape:
         outputs = model(inputs, training=True)
         loss = criterion(labels, tf.squeeze(outputs))
 
     grads = tape.gradient(loss, model.trainable_variables)
-    emb_grads = []
-    other_grads = []
-
+    grads_and_vars = []
     for grad, var in zip(grads, model.trainable_variables):
         if grad is not None:
-            if hasattr(var, "path"):
-                # path is available in TF 2.13+
-                if "sparse_embedding" in var.path and "embeddings" in var.name:
-                    emb_grads.append((grad, var))
-                else:
-                    other_grads.append((grad, var))
-            else:
-                if "sparse_embedding" in var.name:
-                    emb_grads.append((grad, var))
-                else:
-                    other_grads.append((grad, var))
-    embedding_optimizer.apply_gradients(emb_grads)
-    other_optimizer.apply_gradients(other_grads)
+            grads_and_vars.append((grad, var))
+    optimizer.apply_gradients(grads_and_vars)
 
     return loss
 
@@ -278,21 +163,27 @@ def main():
     # 创建模型
     model = create_model()
 
-    # 分离训练变量
-    embedding_parameters, other_parameters = separate_trainable_variables(model)
-
     # 创建优化器和损失函数
-    embedding_optimizer, other_optimizer, criterion = create_optimizer_and_criterion()
+    optimizer, criterion = create_optimizer_and_criterion()
 
-    # 创建示例数据
-    inputs, labels = create_sample_data()
+    # 创建数据集
+    train_dataset, valid_dataset = create_dataset()
 
     try:
         # 训练循环：执行 epochs 次训练步骤
         for epoch in range(epochs):
-            loss = train_step(model, inputs, labels, embedding_optimizer, other_optimizer, criterion)
-            print(f"Epoch {epoch + 1}/{epochs}, Loss: {loss.numpy():.4f}")
-        _ = validate(model, [(inputs, labels)])
+            for inputs, labels in train_dataset:
+                loss = train_step(model, inputs, labels, optimizer, criterion)
+                assert not tf.math.is_nan(loss), "Loss is NaN, stopping training."
+                print(f"Epoch {epoch + 1}/{epochs}, Loss: {loss.numpy():.4f}")
+            val_logloss, val_auc, val_samples = validate(
+                model, valid_dataset, criterion
+            )
+            print(
+                f"Val Logloss: {val_logloss:.4f}, "
+                f"Val AUC: {val_auc:.4f}, "
+                f"Total Val Samples: {val_samples}"
+            )
     except Exception as e:
         print(f"Error during training or validation: {e}")
         sys.exit(1)

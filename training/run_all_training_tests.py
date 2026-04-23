@@ -109,7 +109,7 @@ def run_model_test(
             text=True,
             cwd=str(SCRIPT_DIR / model_name),
             env=env,
-            timeout=300,  # 5分钟超时
+            timeout=900,  # 15分钟超时
         )
 
         output = result.stdout
@@ -173,14 +173,14 @@ def main():
     python run_all_training_tests.py --epochs 10 --gpu 0
     python run_all_training_tests.py --epochs 10 --gpu 0,1,2
     python run_all_training_tests.py --list-models
-        """
+        """,
     )
 
     parser.add_argument(
         "--epochs",
         type=int,
-        default=10,
-        help="训练轮数 (默认: 10)",
+        default=30,
+        help="训练轮数 (默认: 30)",
     )
 
     parser.add_argument(
