@@ -32,12 +32,6 @@ def create_pruned_graph_parser():
     """创建prunedGraph特有的参数解析器"""
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=100,
-        help="batch size for inference (default: 100)"
-    )
-    parser.add_argument(
         "--check-acc",
         action="store_true",
         help="Compare results with CPU baseline for accuracy check",
