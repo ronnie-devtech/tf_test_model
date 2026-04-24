@@ -100,7 +100,7 @@ python run_all_training_tests.py --epochs 10 --log-dir my_logs --musa-plugin ../
 
 ```bash
 cd deepfm
-python test_tf_musa_extension.py --musa_plugin ../../tensorflow_musa_extension/build/libmusa_plugin.so --epochs 10
+python test_tf_musa_extension.py --musa-plugin ../../../tensorflow_musa_extension/build/libmusa_plugin.so --epochs 10
 ```
 
 ## 推理样例使用方法
