@@ -89,7 +89,7 @@ def run_model_test(
         plugin_path = Path(musa_plugin)
         if not plugin_path.is_absolute():
             plugin_path = (SCRIPT_DIR / musa_plugin).resolve()
-        cmd.extend(["--musa_plugin", str(plugin_path)])
+        cmd.extend(["--musa-plugin", str(plugin_path)])
     cmd.extend(["--epochs", str(epochs)])
 
     print(f"\n{'='*60}")

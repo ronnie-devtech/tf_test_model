@@ -139,8 +139,8 @@ def load_musa_plugin(plugin_path):
     if plugin_path is None:
         raise FileNotFoundError(
             "MUSA plugin path not specified and could not be auto-detected.\n"
-            "Please provide --musa_plugin argument or set MUSA_PLUGIN_PATH environment variable.\n"
-            "Example: python test_tf_musa_extension.py --musa_plugin /path/to/libmusa_plugin.so"
+            "Please provide --musa-plugin argument or set MUSA_PLUGIN_PATH environment variable.\n"
+            "Example: python test_tf_musa_extension.py --musa-plugin /path/to/libmusa_plugin.so"
         )
     if not os.path.exists(plugin_path):
         raise FileNotFoundError(
