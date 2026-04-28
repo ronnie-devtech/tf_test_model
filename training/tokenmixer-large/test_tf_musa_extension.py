@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import tensorflow as tf
 import numpy as np
 
@@ -141,6 +142,13 @@ def validate(model, dataset):
     return accuracy, num_samples, recall_pos, pos_samples
 
 
+def get_batch_size(labels):
+    """获取当前 batch size，兼容动态图 shape。"""
+    if labels.shape[0] is not None:
+        return int(labels.shape[0])
+    return int(tf.shape(labels)[0].numpy())
+
+
 @tf.function
 def train_step(model, inputs, labels, embedding_optimizer, other_optimizer, criterion):
     """单步训练函数"""
@@ -197,9 +205,16 @@ def main():
     train_dataset, valid_dataset = create_dataset()
 
     try:
-        # 训练循环：执行 epochs 次训练步骤
+        # 训练循环：执行 epochs 次训练止骤
+        global_step = 0
         for epoch in range(epochs):
+            prev_loss_value = None
+            epoch_loss_sum = 0.0
+            epoch_step_count = 0
             for inputs, labels in train_dataset:
+                global_step += 1
+                epoch_step_count += 1
+                iter_start = time.perf_counter()
                 loss = train_step(
                     model,
                     inputs,
@@ -209,7 +224,48 @@ def main():
                     criterion,
                 )
                 assert not tf.math.is_nan(loss), "Loss is NaN, stopping training."
-                print(f"Epoch {epoch + 1}/{epochs}, Loss: {loss.numpy():.4f}")
+                loss_value = float(loss.numpy())
+                iter_time_sec = time.perf_counter() - iter_start
+                batch_size = get_batch_size(labels)
+                samples_per_sec = batch_size / iter_time_sec if iter_time_sec > 0 else 0.0
+                epoch_loss_sum += loss_value
+
+                if prev_loss_value is None:
+                    loss_drop = None
+                    loss_drop_pct = None
+                    loss_drop_per_sec = None
+                else:
+                    loss_drop = prev_loss_value - loss_value
+                    loss_drop_pct = (
+                        (loss_drop / prev_loss_value) * 100.0
+                        if prev_loss_value != 0
+                        else 0.0
+                    )
+                    loss_drop_per_sec = (
+                        loss_drop / iter_time_sec if iter_time_sec > 0 else 0.0
+                    )
+
+                avg_loss = epoch_loss_sum / epoch_step_count
+                if loss_drop is None:
+                    convergence_msg = "loss_drop=N/A, loss_drop_pct=N/A, loss_drop_per_sec=N/A"
+                else:
+                    convergence_msg = (
+                        f"loss_drop={loss_drop:+.6f}, "
+                        f"loss_drop_pct={loss_drop_pct:+.2f}%, "
+                        f"loss_drop_per_sec={loss_drop_per_sec:+.6f}/s"
+                    )
+
+                print(
+                    f"Epoch {epoch + 1}/{epochs}, "
+                    f"Iter {epoch_step_count}, "
+                    f"Global Step {global_step}, "
+                    f"Loss: {loss_value:.6f}, "
+                    f"Avg Loss: {avg_loss:.6f}, "
+                    f"{convergence_msg}, "
+                    f"Step Time: {iter_time_sec:.4f}s, "
+                    f"Samples/s: {samples_per_sec:.2f}"
+                )
+                prev_loss_value = loss_value
             accuracy, num_samples, recall_pos, pos_samples = validate(
                 model, valid_dataset
             )
