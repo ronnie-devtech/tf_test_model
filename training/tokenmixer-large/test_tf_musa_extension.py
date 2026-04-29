@@ -188,6 +188,11 @@ def main():
     args = parse_arguments()
     plugin_path = args.musa_plugin
     epochs = args.epochs
+    enable_tf32 = args.enable_tf32
+
+    if enable_tf32:
+        os.environ["MUSA_ENABLE_TF32"] = "1"
+        print("MUSA_ENABLE_TF32=1")
 
     # 加载 MUSA 插件
     load_musa_plugin(plugin_path)
@@ -223,9 +228,9 @@ def main():
                     other_optimizer,
                     criterion,
                 )
+                iter_time_sec = time.perf_counter() - iter_start
                 assert not tf.math.is_nan(loss), "Loss is NaN, stopping training."
                 loss_value = float(loss.numpy())
-                iter_time_sec = time.perf_counter() - iter_start
                 batch_size = get_batch_size(labels)
                 samples_per_sec = batch_size / iter_time_sec if iter_time_sec > 0 else 0.0
                 epoch_loss_sum += loss_value
@@ -266,6 +271,7 @@ def main():
                     f"Samples/s: {samples_per_sec:.2f}"
                 )
                 prev_loss_value = loss_value
+
             accuracy, num_samples, recall_pos, pos_samples = validate(
                 model, valid_dataset
             )

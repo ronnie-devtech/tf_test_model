@@ -18,10 +18,21 @@ class RMSNorm(layers.Layer):
         )
 
     def call(self, x):
-        # norm = mean(x^2)
-        norm = tf.reduce_mean(tf.pow(x, 2), axis=-1, keepdims=True)
+        norm = tf.reduce_mean(tf.square(x), axis=-1, keepdims=True)
         x = x * tf.math.rsqrt(norm + self.eps)
         return self.scale * x
+
+
+def _concat_glorot_initializer(split_sizes):
+    glorot = tf.keras.initializers.GlorotUniform()
+
+    def _initializer(shape, dtype=None):
+        shape = tf.TensorShape(shape).as_list()
+        prefix_shape = shape[:-1]
+        parts = [glorot(prefix_shape + [size], dtype=dtype) for size in split_sizes]
+        return tf.concat(parts, axis=-1)
+
+    return _initializer
 
 
 class PertokenSwiGLU(layers.Layer):
@@ -47,6 +58,78 @@ class PertokenSwiGLU(layers.Layer):
         return self.fc_down(up * gate)
 
 
+class StackedExpertSwiGLU(layers.Layer):
+    def __init__(
+        self, num_experts, dim, hidden_mult=4, down_scale=0.01, bias=False, **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.num_experts = num_experts
+        self.dim = dim
+        self.hidden_dim = int(dim * hidden_mult)
+        self.use_bias = bias
+        self.down_scale = down_scale
+
+    def build(self, input_shape):
+        hidden_shape = (self.num_experts, self.dim, self.hidden_dim)
+        down_shape = (self.num_experts, self.hidden_dim, self.dim)
+        self.up_kernel = self.add_weight(
+            name="up_kernel",
+            shape=hidden_shape,
+            initializer="glorot_uniform",
+            trainable=True,
+        )
+        self.gate_kernel = self.add_weight(
+            name="gate_kernel",
+            shape=hidden_shape,
+            initializer="glorot_uniform",
+            trainable=True,
+        )
+        self.down_kernel = self.add_weight(
+            name="down_kernel",
+            shape=down_shape,
+            initializer=tf.keras.initializers.VarianceScaling(
+                scale=self.down_scale, mode="fan_avg", distribution="uniform"
+            ),
+            trainable=True,
+        )
+        if self.use_bias:
+            self.up_bias = self.add_weight(
+                name="up_bias",
+                shape=(self.num_experts, self.hidden_dim),
+                initializer="zeros",
+                trainable=True,
+            )
+            self.gate_bias = self.add_weight(
+                name="gate_bias",
+                shape=(self.num_experts, self.hidden_dim),
+                initializer="zeros",
+                trainable=True,
+            )
+            self.down_bias = self.add_weight(
+                name="down_bias",
+                shape=(self.num_experts, self.dim),
+                initializer="zeros",
+                trainable=True,
+            )
+        else:
+            self.up_bias = None
+            self.gate_bias = None
+            self.down_bias = None
+
+    def call(self, x):
+        up = tf.einsum("btd,edh->bteh", x, self.up_kernel)
+        gate_logits = tf.einsum("btd,edh->bteh", x, self.gate_kernel)
+        if self.use_bias:
+            up = up + self.up_bias[tf.newaxis, tf.newaxis, :, :]
+            gate_logits = gate_logits + self.gate_bias[tf.newaxis, tf.newaxis, :, :]
+        gate = tf.nn.sigmoid(gate_logits) * gate_logits
+        hidden = up * gate
+        outputs = tf.einsum("bteh,ehd->bted", hidden, self.down_kernel)
+        if self.use_bias:
+            outputs = outputs + self.down_bias[tf.newaxis, tf.newaxis, :, :]
+        return outputs
+
+
 class SparsePertokenMoE(layers.Layer):
     def __init__(
         self,
@@ -62,43 +145,30 @@ class SparsePertokenMoE(layers.Layer):
         self.num_experts = num_experts
         self.top_k = top_k
         self.alpha = alpha
+        self.num_routed_experts = num_experts - 1
 
         self.router = layers.Dense(num_experts, use_bias=bias)
-        # In TF 2.4, we just use a list of layers
-        self.experts = [
-            PertokenSwiGLU(dim, hidden_mult, bias=bias) for _ in range(num_experts - 1)
-        ]
+        self.experts = StackedExpertSwiGLU(
+            self.num_routed_experts, dim, hidden_mult, bias=bias
+        )
         self.shared_expert = PertokenSwiGLU(dim, hidden_mult, bias=bias)
 
     def call(self, x):
-        # Shape: (B, T, D)
         logits = self.router(x)
         probs = tf.nn.softmax(logits, axis=-1)
-
-        # Get top-k
         topk_vals, topk_idx = tf.math.top_k(probs, k=self.top_k)
 
-        # We initialize output as zeros
-        output = tf.zeros_like(x)
-
-        # Loop over top-k (excluding the last slot if strictly following PyTorch logic)
-        for i in range(self.top_k - 1):
-            expert_prob = tf.expand_dims(topk_vals[..., i], axis=-1)
-            indices = topk_idx[..., i]
-
-            expert_outputs_sum = tf.zeros_like(x)
-            for j, expert in enumerate(self.experts):
-                # Create mask for which tokens go to which expert
-                mask = tf.cast(tf.equal(indices, j), dtype=x.dtype)
-                mask = tf.expand_dims(mask, axis=-1)
-
-                # Apply expert to all then mask (more TF friendly than boolean indexing)
-                exp_out = expert(x)
-                expert_outputs_sum += exp_out * mask
-
-            output += self.alpha * expert_prob * expert_outputs_sum
-
-        # Shared expert always activated
+        routed_outputs = self.experts(x)
+        routed_mask = tf.one_hot(
+            topk_idx[..., : self.top_k - 1],
+            depth=self.num_routed_experts,
+            dtype=x.dtype,
+        )
+        selected_outputs = tf.einsum(
+            "bted,btke->btkd", routed_outputs, routed_mask
+        )
+        weighted_outputs = selected_outputs * topk_vals[..., : self.top_k - 1, tf.newaxis]
+        output = self.alpha * tf.reduce_sum(weighted_outputs, axis=2)
         output += self.shared_expert(x)
         return output
 
@@ -194,23 +264,20 @@ class SemanticTokenizer(layers.Layer):
         )
 
     def call(self, groups):
-        # groups is a list of lists of tensors
         tokens = []
-        for group_tensors, mlp in zip(groups, self.mlps):
-            # Concatenate tensors in each group
-            concat = tf.concat(group_tensors, axis=-1)
+        for group_tensor, mlp in zip(groups, self.mlps):
+            if isinstance(group_tensor, (list, tuple)):
+                concat = tf.concat(group_tensor, axis=-1)
+            else:
+                batch_size = tf.shape(group_tensor)[0]
+                concat = tf.reshape(group_tensor, (batch_size, -1))
             tokens.append(mlp(concat))
 
-        # Stack into [B, T-1, D]
         stacked = tf.stack(tokens, axis=1)
-
-        # Global token: Flatten stacked and pass through global_mlp
         batch_size = tf.shape(stacked)[0]
         flattened = tf.reshape(stacked, (batch_size, -1))
         global_token = self.global_mlp(flattened)
         global_token = tf.expand_dims(global_token, axis=1)
-
-        # Concatenate global token with group tokens
         return tf.concat([global_token, stacked], axis=1)
 
 
@@ -260,18 +327,11 @@ class TokenMixerLarge(tf.keras.Model):
     def call(self, inputs, training=False):
         sparse_inputs, dense_inputs = inputs
         x = self.embedding(sparse_inputs, dense_inputs)
-        x = self.tokenizer(
-            [
-                [x[:, i] for i in range(self.dim_input_sparse)],
-                [
-                    x[:, i]
-                    for i in range(
-                        self.dim_input_sparse,
-                        self.dim_input_sparse + self.dim_input_dense,
-                    )
-                ],
-            ]
-        )
+        sparse_group = x[:, : self.dim_input_sparse, :]
+        dense_group = x[
+            :, self.dim_input_sparse : self.dim_input_sparse + self.dim_input_dense, :
+        ]
+        x = self.tokenizer([sparse_group, dense_group])
         is_last_layer = self.num_layers - 1
         residual_cache = []
         for i, layer in enumerate(self.blocks):

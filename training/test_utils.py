@@ -32,6 +32,11 @@ def parse_arguments():
         default=10,
         help="Number of training epochs (default: 10)",
     )
+    parser.add_argument(
+        "--enable-tf32",
+        action="store_true",
+        help="Enable TF32 kernels via MUSA_ENABLE_TF32=1 while keeping tensors in FP32.",
+    )
     args = parser.parse_args()
     return args
 
