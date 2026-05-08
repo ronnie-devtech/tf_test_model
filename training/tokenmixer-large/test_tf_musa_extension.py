@@ -1,4 +1,67 @@
 import os
+
+
+def _env_flag(name):
+    value = os.environ.get(name, "")
+    return value.lower() in ("1", "true", "on", "yes")
+
+
+def _parse_cpu_affinity(spec):
+    cpus = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start, end = part.split("-", 1)
+            start = int(start)
+            end = int(end)
+            if end < start:
+                raise ValueError(f"invalid CPU range: {part}")
+            cpus.update(range(start, end + 1))
+        else:
+            cpus.add(int(part))
+    if not cpus:
+        raise ValueError("empty CPU affinity")
+    return cpus
+
+
+def _configure_fast_runtime_preset():
+    """Configure measured-fast S5000 runtime knobs before TensorFlow import."""
+    if not _env_flag("TOKENMIXER_FAST_RUNTIME"):
+        return []
+
+    defaults = {
+        "TF_NUM_INTEROP_THREADS": "1",
+        "TF_NUM_INTRAOP_THREADS": "1",
+        "TF_ENABLE_ONEDNN_OPTS": "0",
+        "OMP_NUM_THREADS": "1",
+        "KMP_BLOCKTIME": "0",
+        "MUSA_PAGEABLE_H2D_ON_COMPUTE_STREAM": "1",
+        "TF_CPP_MIN_LOG_LEVEL": "2",
+    }
+    applied = []
+    for name, value in defaults.items():
+        before = os.environ.get(name)
+        os.environ.setdefault(name, value)
+        after = os.environ.get(name)
+        if before is None:
+            applied.append(f"{name}={after}")
+
+    affinity = os.environ.get("TOKENMIXER_CPU_AFFINITY", "0-7")
+    if affinity.lower() not in ("", "none", "off"):
+        try:
+            cpus = _parse_cpu_affinity(affinity)
+            os.sched_setaffinity(0, cpus)
+            applied.append(f"cpu_affinity={affinity}")
+        except Exception as exc:
+            applied.append(f"cpu_affinity={affinity} failed: {exc}")
+
+    return applied
+
+
+_FAST_RUNTIME_PRESET = _configure_fast_runtime_preset()
+
 import sys
 import time
 import tensorflow as tf
@@ -183,6 +246,10 @@ def main():
     """主函数"""
     # 设置环境
     setup_environment()
+
+    if _FAST_RUNTIME_PRESET:
+        print("TOKENMIXER_FAST_RUNTIME=1")
+        print("Fast runtime preset: " + ", ".join(_FAST_RUNTIME_PRESET))
 
     # 解析参数
     args = parse_arguments()
